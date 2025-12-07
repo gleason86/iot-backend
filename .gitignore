@@ -1,0 +1,49 @@
+# Environment files with secrets
+.env
+.env.*
+!.env.example
+
+# MQTT password file
+mosquitto/password.txt
+
+# Local data volumes (managed by Docker)
+data/
+
+# Secrets directory
+secrets/
+
+# Files containing secrets patterns
+*.secret
+*.secret.*
+*.secrets
+*.secrets.*
+*.local
+*.local.*
+*-local.*
+
+# Credential and key files
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+id_rsa*
+*.keystore
+
+# Backup files (may contain sensitive data)
+*.bak
+*.backup
+*.old
+*~
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs (may contain sensitive information)
+*.log
+logs/

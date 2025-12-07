@@ -1,0 +1,21 @@
+# Grafana Datasource Provisioning
+# Auto-configures InfluxDB connection on startup
+
+apiVersion: 1
+
+datasources:
+  - name: InfluxDB
+    type: influxdb
+    access: proxy
+    url: http://influxdb:8086
+    jsonData:
+      version: Flux
+      organization: home
+      defaultBucket: iot
+      tlsSkipVerify: true
+    secureJsonData:
+      token: $INFLUXDB_ADMIN_TOKEN
+    isDefault: true
+    editable: true
+
+
