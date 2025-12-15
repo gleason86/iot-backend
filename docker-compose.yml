@@ -85,6 +85,142 @@ services:
     networks:
       - iot-network
 
+  # =========================================================================
+  # Emporia Vue Historical Data Import
+  # =========================================================================
+  emporia-import:
+    build: ./vuegraf
+    container_name: iot-emporia-import
+    restart: "no"
+    depends_on:
+      - influxdb
+    environment:
+      - EMPORIA_EMAIL=${EMPORIA_EMAIL}
+      - EMPORIA_PASSWORD=${EMPORIA_PASSWORD}
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_ORG=${INFLUXDB_ORG}
+      - INFLUXDB_BUCKET=${INFLUXDB_BUCKET}
+      - INFLUXDB_TOKEN=${INFLUXDB_ADMIN_TOKEN}
+      - HISTORY_DAYS=365
+    networks:
+      - iot-network
+
+  # =========================================================================
+  # Vector Database (for Voice Assistant RAG)
+  # =========================================================================
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: iot-chromadb
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ANONYMIZED_TELEMETRY=FALSE
+      - CHROMA_SERVER_AUTH_CREDENTIALS=${CHROMA_SERVER_AUTH_CREDENTIALS:-}
+      - CHROMA_SERVER_AUTH_PROVIDER=${CHROMA_SERVER_AUTH_PROVIDER:-}
+    volumes:
+      - chromadb_data:/chroma/chroma
+    networks:
+      - iot-network
+
+  # =========================================================================
+  # MCP Server (for Voice Assistant HA Integration)
+  # Note: The current container image (ghcr.io/jango-blockchained/advanced-homeassistant-mcp)
+  # binds to localhost internally, making it inaccessible from host.
+  # For now, voice_assistant uses npx/stdio transport instead.
+  # TODO: Re-enable when container supports HOST=0.0.0.0 or socat workaround.
+  # =========================================================================
+  homeassistant-mcp:
+    image: ghcr.io/jango-blockchained/advanced-homeassistant-mcp:latest
+    container_name: iot-homeassistant-mcp
+    restart: unless-stopped
+    ports:
+      - "4000:7123"  # Server listens on 7123 internally (FastMCP HTTP Stream)
+    environment:
+      - HOME_ASSISTANT_URL=${HOME_ASSISTANT_URL:-http://homeassistant.local:8123}
+      - HOME_ASSISTANT_TOKEN=${HOME_ASSISTANT_TOKEN}
+      - HOST=0.0.0.0
+      - FASTMCP_HOST=0.0.0.0
+      - MCP_HTTP_HOST=0.0.0.0
+    networks:
+      - iot-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7123/mcp"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # =========================================================================
+  # Voice Assistant Full Engine (FastAPI + WebSocket + STT + LLM + TTS)
+  # =========================================================================
+  voice-engine:
+    build:
+      context: ../voice_assistant
+      dockerfile: Dockerfile.full-engine
+    container_name: voice-engine
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      # InfluxDB for telemetry
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=${INFLUXDB_ADMIN_TOKEN}
+      - INFLUXDB_ORG=${INFLUXDB_ORG}
+      - INFLUXDB_BUCKET=voice_telemetry
+      # Server config
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8765
+      # OpenAI API (for STT/LLM)
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # Home Assistant (for tool calls)
+      - HA_BASE_URL=${HOME_ASSISTANT_URL}
+      - HA_TOKEN=${HOME_ASSISTANT_TOKEN}
+      # Azure Speech (optional, for TTS)
+      - AZURE_SPEECH_KEY=${AZURE_SPEECH_KEY:-}
+      - AZURE_SPEECH_REGION=${AZURE_SPEECH_REGION:-}
+      # Docker detection for MCP config selection
+      - RUNNING_IN_DOCKER=true
+    volumes:
+      # Mount Docker-specific MCP config
+      - ../voice_assistant/config/mcp_servers.docker.yaml:/app/config/mcp_servers.docker.yaml:ro
+      # Optional: mount credentials directory for file-based auth
+      # - ../voice_assistant/credentials:/app/credentials:ro
+    depends_on:
+      - influxdb
+      - homeassistant-mcp
+    networks:
+      - iot-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # =========================================================================
+  # Voice Assistant Web UI (React SPA)
+  # Accessible at http://localhost:3001/assistant
+  # =========================================================================
+  voice-ui:
+    build:
+      context: ../voice_assistant/voice_debug_ui
+      dockerfile: Dockerfile
+    container_name: voice-ui
+    restart: unless-stopped
+    ports:
+      - "3001:80"
+    depends_on:
+      - voice-engine
+    networks:
+      - iot-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
 networks:
   iot-network:
     driver: bridge
@@ -95,4 +231,5 @@ volumes:
   influxdb_data:
   influxdb_config:
   grafana_data:
+  chromadb_data:
 

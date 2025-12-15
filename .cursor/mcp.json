@@ -1,0 +1,8 @@
+﻿{
+  "mcpServers": {
+    "home_assistant": {
+      "command": "python",
+      "args": ["C:\\Users\\david\\Repos\\voice_assistant\\mcp_process_manager.py"]
+    }
+  }
+}

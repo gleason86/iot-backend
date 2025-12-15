@@ -1,6 +1,6 @@
 # IoT Backend
 
-A Docker-based backend for collecting, storing, and visualizing IoT sensor data from Arduino devices.
+A Docker-based backend for collecting, storing, and visualizing IoT sensor data from Arduino devices. Includes vector database support for voice assistant RAG (Retrieval Augmented Generation).
 
 ## Architecture
 
@@ -9,16 +9,21 @@ Arduino Uno R4 WiFi ──MQTT──▶ Mosquitto ──▶ Telegraf ──▶ I
                                 │                            │
                                 ▼                            ▼
                          Home Assistant ◀────────────────────┘
+                                                             │
+                                                             ▼
+                         Voice Assistant ◀── ChromaDB (RAG) ─┘
 ```
 
 ## Services
 
-| Service    | Port | Description                          |
-|------------|------|--------------------------------------|
-| Mosquitto  | 1883 | MQTT broker for device communication |
-| InfluxDB   | 8086 | Time-series database for sensor data |
-| Telegraf   | -    | MQTT to InfluxDB data pipeline       |
-| Grafana    | 3000 | Visualization dashboards             |
+| Service            | Port | Description                                  |
+|--------------------|------|----------------------------------------------|
+| Mosquitto          | 1883 | MQTT broker for device communication         |
+| InfluxDB           | 8086 | Time-series database for sensor data         |
+| Telegraf           | -    | MQTT to InfluxDB data pipeline               |
+| Grafana            | 3000 | Visualization dashboards                     |
+| ChromaDB           | 8000 | Vector database for voice assistant RAG      |
+| HomeAssistant MCP  | 4000 | MCP server for voice assistant HA integration|
 
 ## Quick Start
 
@@ -30,7 +35,7 @@ Arduino Uno R4 WiFi ──MQTT──▶ Mosquitto ──▶ Telegraf ──▶ I
 ### 1. Configure Environment
 
 ```bash
-cp .env.example .env
+cp env.example.txt .env
 # Edit .env with your credentials
 ```
 
@@ -44,6 +49,8 @@ docker compose up -d
 
 - **Grafana**: http://localhost:3000 (admin / see .env)
 - **InfluxDB**: http://localhost:8086
+- **ChromaDB**: http://localhost:8000/api/v1/heartbeat
+- **MCP Server**: http://localhost:4000 (for voice assistant)
 
 ### 4. Configure Arduino
 
@@ -70,6 +77,44 @@ Example payload:
   "motion": false,
   "uptime_ms": 3600000
 }
+```
+
+## ChromaDB Integration (Voice Assistant RAG)
+
+The ChromaDB service provides vector storage for the voice assistant's adaptive learning system:
+
+### Purpose
+- Store embeddings of past voice interactions
+- Enable semantic search for similar commands
+- Support learning from user corrections
+
+### Configuration
+
+Add optional authentication in `.env`:
+```env
+CHROMA_SERVER_AUTH_CREDENTIALS=your-token-here
+CHROMA_SERVER_AUTH_PROVIDER=chromadb.auth.token.TokenAuthServerProvider
+```
+
+### Voice Assistant Configuration
+
+In your voice assistant, point to the ChromaDB server:
+```yaml
+vector_store:
+  enabled: true
+  provider: chromadb
+  host: localhost  # or docker service name
+  port: 8000
+```
+
+### API Examples
+
+```bash
+# Health check
+curl http://localhost:8000/api/v1/heartbeat
+
+# List collections
+curl http://localhost:8000/api/v1/collections
 ```
 
 ## Home Assistant Integration
@@ -106,6 +151,72 @@ mqtt:
 
 For historical data access, add the InfluxDB integration in Home Assistant.
 
+## MCP Server (Voice Assistant Integration)
+
+The HomeAssistant MCP (Model Context Protocol) server enables the voice assistant to control Home Assistant devices through a standardized tool interface.
+
+### Configuration
+
+Add your Home Assistant credentials to `.env`:
+
+```env
+HOME_ASSISTANT_URL=http://homeassistant.local:8123
+HOME_ASSISTANT_TOKEN=your_long_lived_access_token_here
+```
+
+To generate a long-lived access token in Home Assistant:
+1. Go to your Profile (bottom left)
+2. Scroll to "Long-Lived Access Tokens"
+3. Click "Create Token" and copy the value
+
+### Voice Assistant Configuration
+
+In your voice assistant's `config/mcp_servers.yaml`:
+
+```yaml
+mcp:
+  enabled: true
+  servers:
+    home_assistant:
+      transport: sse
+      url: "http://localhost:4000/sse"
+      enabled: true
+```
+
+### Available Tools
+
+The MCP server provides 30+ tools for Home Assistant control:
+
+| Category | Tools |
+|----------|-------|
+| Device Control | lights, climate, media_player, cover, lock, fan, vacuum |
+| Automation | scenes, automations, scripts |
+| System | device discovery, history, notifications |
+| Smart Features | maintenance, smart scenarios |
+
+### API Examples
+
+```bash
+# Health check
+curl http://localhost:4000/health
+
+# Check server info (if supported)
+curl http://localhost:4000/
+```
+
+### Troubleshooting
+
+```bash
+# View MCP server logs
+docker compose logs -f homeassistant-mcp
+
+# Restart MCP server
+docker compose restart homeassistant-mcp
+
+# Check if Home Assistant is reachable from container
+docker compose exec homeassistant-mcp curl -s $HOME_ASSISTANT_URL/api/
+```
+
 ## Project Structure
 
 ```
@@ -113,14 +224,28 @@ iot-backend/
 ├── README.md
 ├── CHANGELOG.md
 ├── docker-compose.yml
-├── .env.example
+├── env.example.txt
+├── .cursor/
+│   └── rules/
+│       ├── iot_backend_rules.mdc    # Main coding standards
+│       ├── data_schema.mdc          # Sensor data schema
+│       └── security.mdc             # Security best practices
 ├── mosquitto/
-│   └── mosquitto.conf
+│   ├── mosquitto.conf
+│   └── password.txt.example
 ├── telegraf/
 │   └── telegraf.conf
-└── grafana/
-    └── dashboards/
-        └── iot-sensors.json
+├── grafana/
+│   ├── dashboards/
+│   │   └── iot/
+│   │       └── iot-sensors.json
+│   └── provisioning/
+│       ├── dashboards/
+│       └── datasources/
+└── scripts/
+    ├── setup.ps1
+    ├── start.ps1
+    └── stop.ps1
 ```
 
 ## Troubleshooting
@@ -132,6 +257,8 @@ docker compose logs -f mosquitto
 docker compose logs -f telegraf
 docker compose logs -f influxdb
 docker compose logs -f grafana
+docker compose logs -f chromadb
+docker compose logs -f homeassistant-mcp
 ```
 
 ### Test MQTT connection
@@ -151,8 +278,34 @@ from(bucket: "iot")
   |> filter(fn: (r) => r._measurement == "sensor_data")
 ```
 
+### Test ChromaDB
+
+```bash
+# Check if ChromaDB is running
+curl http://localhost:8000/api/v1/heartbeat
+
+# Should return: {"nanosecond heartbeat": <timestamp>}
+```
+
+## Service Management
+
+```powershell
+# Start all services
+docker compose up -d
+
+# Stop all services
+docker compose down
+
+# Restart specific service
+docker compose restart telegraf
+
+# View real-time logs
+docker compose logs -f
+
+# Remove all data (reset)
+docker compose down -v
+```
+
 ## License
 
 MIT
-
-

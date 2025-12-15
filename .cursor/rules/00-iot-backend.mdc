@@ -1,0 +1,151 @@
+---
+description: IoT Backend coding standards and data pipeline conventions
+globs: "**/*.{yml,yaml,json,conf,toml}"
+alwaysApply: true
+---
+
+# IoT Backend Rules
+
+> **Related Rules Files:**
+> - `data_schema.mdc` - Canonical sensor data schema and field definitions
+> - `security.mdc` - Security best practices and secret management
+
+---
+
+## Project Architecture
+
+```
+┌─────────────────┐     ┌───────────────┐     ┌──────────────┐     ┌───────────────┐     ┌───────────────┐
+│  Arduino/IoT    │────▶│   Mosquitto   │────▶│   Telegraf   │────▶│   InfluxDB    │────▶│    Grafana    │
+│    Devices      │     │  MQTT Broker  │     │   Pipeline   │     │   Database    │     │  Dashboards   │
+└─────────────────┘     └───────────────┘     └──────────────┘     └───────────────┘     └───────────────┘
+     (upstream)                                                           │
+                                                                          ▼
+                        ┌───────────────┐                         ┌───────────────┐
+                        │   ChromaDB    │◀────────────────────────│ Voice Assist  │
+                        │  Vector Store │                         │    (RAG)      │
+                        └───────────────┘                         └───────────────┘
+```
+
+### Component Locations
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| IoT Device Code | `../Arduino/` | Sensor firmware (separate repo) |
+| MQTT Broker | `mosquitto/mosquitto.conf` | Device communication |
+| Data Pipeline | `telegraf/telegraf.conf` | MQTT → InfluxDB |
+| Database | InfluxDB (docker-compose.yml) | Time-series storage |
+| Dashboards | `grafana/dashboards/*.json` | Visualization |
+| Vector Store | ChromaDB (docker-compose.yml) | Voice assistant RAG |
+| Infrastructure | `docker-compose.yml` | Container orchestration |
+
+---
+
+## File-Specific Guidelines
+
+### docker-compose.yml
+- Environment variables for credentials use `.env` file
+- Volume mounts for config files should be read-only (`:ro`)
+- Service dependencies must reflect data flow order
+- Use named volumes for data persistence
+- Always set `restart: unless-stopped` for production services
+
+### telegraf/telegraf.conf
+- Each JSON field from IoT devices must have a corresponding field definition
+- Use `optional = true` for all fields (devices may not send all fields)
+- Tags are indexed; use sparingly (device_id, location, etc.)
+- Fields are not indexed; use for measurements (temperature, humidity, etc.)
+
+### grafana/dashboards/*.json
+- All panels querying sensor data must use measurement `sensor_data`
+- Use template variable `${device:regex}` for device filtering
+- Queries should use `aggregateWindow()` for time-series panels
+- Use consistent color schemes across related metrics
+
+### mosquitto/mosquitto.conf
+- Always enable authentication for production
+- Configure persistence for message durability
+- Set appropriate QoS levels for sensor data
+
+---
+
+## Common Flux Query Patterns
+
+### Query a specific field
+```flux
+from(bucket: "iot")
+  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+  |> filter(fn: (r) => r._measurement == "sensor_data")
+  |> filter(fn: (r) => r._field == "temperature_f")
+  |> filter(fn: (r) => r.device_id =~ /${device:regex}/)
+```
+
+### Get latest value
+```flux
+from(bucket: "iot")
+  |> range(start: -5m)
+  |> filter(fn: (r) => r._measurement == "sensor_data")
+  |> filter(fn: (r) => r._field == "humidity")
+  |> last()
+```
+
+### Aggregate for time-series
+```flux
+from(bucket: "iot")
+  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+  |> filter(fn: (r) => r._measurement == "sensor_data")
+  |> filter(fn: (r) => r._field == "dew_point_f")
+  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)
+```
+
+---
+
+## Quick Commands
+
+```powershell
+# Restart services after config changes
+docker compose restart telegraf grafana
+
+# View Telegraf logs for parsing errors
+docker compose logs -f telegraf
+
+# Test MQTT message manually
+mosquitto_pub -h localhost -p 1883 -u $MQTT_USER -P $MQTT_PASSWORD -t "iot/sensors/test/data" -m '{"device_id":"test","temperature_f":72.5,"humidity":45.0}'
+
+# Query InfluxDB directly
+docker compose exec influxdb influx query 'from(bucket:"iot") |> range(start:-1h) |> limit(n:10)'
+
+# Check ChromaDB health
+curl http://localhost:8000/api/v1/heartbeat
+```
+
+---
+
+## Cursor Commands
+- Location: `.cursor/commands/` (pinned to repo path).
+- Available commands:
+  - `stack-up.md` — `docker compose up -d`
+  - `stack-down.md` — `docker compose down`
+  - `restart-data-path.md` — restart Telegraf + Grafana
+  - `telegraf-logs.md` — bounded tail of Telegraf logs
+  - `influx-query.md` — quick Flux query (last 5m, 10 rows)
+  - `chromadb-health.md` — heartbeat check
+
+## PowerShell Gotchas
+- Use `;` for chaining (not `&&`).
+- Use `docker compose` (space) not `docker-compose` (deprecated).
+- Flux queries: wrap in single quotes to avoid `|>` interpolation.
+- Keep log tails bounded (`--tail=200`) to avoid huge outputs.
+- Ensure Docker Desktop is running; otherwise compose/exec will fail.
+
+---
+
+## Validation Checklist
+
+Before committing changes that affect data structure:
+
+- [ ] Telegraf config has field definition for all IoT payload fields
+- [ ] Field types match between IoT device code and Telegraf config
+- [ ] Grafana dashboards can query all stored fields
+- [ ] No orphaned dashboard panels querying removed fields
+- [ ] CHANGELOG.md updated with schema changes
+- [ ] Restart containers to apply config changes

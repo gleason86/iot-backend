@@ -1,0 +1,137 @@
+---
+description: Canonical sensor data schema and field change procedures
+globs: "telegraf/*.conf, grafana/**/*.json"
+alwaysApply: false
+---
+
+# IoT Data Schema
+
+This document defines the canonical sensor data schema and procedures for schema changes.
+
+---
+
+## Canonical Schema Definition
+
+The JSON payload from IoT devices:
+
+```json
+{
+  "device_id": "string",           // Tag: Device identifier
+  "temperature_c": "float",        // Field: Temperature in Celsius
+  "temperature_f": "float",        // Field: Temperature in Fahrenheit
+  "humidity": "float",             // Field: Relative humidity (%)
+  "dew_point_c": "float",          // Field: Dew point in Celsius
+  "dew_point_f": "float",          // Field: Dew point in Fahrenheit
+  "motion": "boolean",             // Field: Motion detected flag
+  "motion_count": "int",           // Field: Motion event count per interval
+  "uptime_ms": "int",              // Field: Device uptime in milliseconds
+  "temp_min_f": "float",           // Field: Session minimum temperature (F)
+  "temp_max_f": "float",           // Field: Session maximum temperature (F)
+  "humidity_min": "float",         // Field: Session minimum humidity
+  "humidity_max": "float",         // Field: Session maximum humidity
+  "status": "string",              // Field: Device status (online/offline)
+  "ip": "string"                   // Field: Device IP address
+}
+```
+
+---
+
+## MQTT Topics
+
+| Topic Pattern | Purpose |
+|---------------|---------|
+| `iot/sensors/{device_id}/data` | Sensor data payloads |
+| `iot/sensors/{device_id}/status` | Device status updates |
+
+---
+
+## InfluxDB Schema
+
+| Property | Value |
+|----------|-------|
+| **Measurement** | `sensor_data` |
+| **Tags** | `device_id` |
+| **Fields** | All sensor data fields listed above |
+
+---
+
+## Field Reference Table
+
+| Field | Type | Description | Telegraf | Grafana Panel |
+|-------|------|-------------|----------|---------------|
+| device_id | string | Device identifier | Tag | Variable filter |
+| temperature_f | float | Temperature (°F) | Field | Temperature chart, gauge |
+| temperature_c | float | Temperature (°C) | Field | (available) |
+| humidity | float | Relative humidity % | Field | Humidity chart, gauge |
+| dew_point_f | float | Dew point (°F) | Field | Dew Point chart |
+| dew_point_c | float | Dew point (°C) | Field | (available) |
+| motion | boolean | Motion detected | Field | Motion Status stat |
+| motion_count | int | Events per interval | Field | Motion Count bar chart |
+| uptime_ms | int | Device uptime | Field | (available) |
+| temp_min_f | float | Session min temp | Field | (available) |
+| temp_max_f | float | Session max temp | Field | (available) |
+| humidity_min | float | Session min humidity | Field | (available) |
+| humidity_max | float | Session max humidity | Field | (available) |
+| status | string | online/offline | Field | (available) |
+| ip | string | Device IP | Field | (available) |
+
+---
+
+## Schema Change Procedures
+
+### Adding a New Sensor Field
+
+When adding a new field to the IoT data payload:
+
+1. **Update Telegraf config** (`telegraf/telegraf.conf`):
+   ```toml
+   [[inputs.mqtt_consumer.json_v2.field]]
+     path = "new_field_name"
+     type = "float"  # or int, boolean, string
+     optional = true
+   ```
+
+2. **Update Grafana dashboard** (`grafana/dashboards/iot-sensors.json`):
+   - Add visualization panel(s) for the new field
+   - Use `r._field == "new_field_name"` in Flux query
+   - Choose correct unit type and visualization style
+
+3. **Document the change** in `CHANGELOG.md`
+
+4. **Restart services**:
+   ```bash
+   docker compose restart telegraf grafana
+   ```
+
+### Removing a Sensor Field
+
+1. **Update Telegraf config**: Remove or comment out the field definition
+2. **Update Grafana dashboards**: Remove any panels/queries referencing the field
+3. **Note**: Historical data in InfluxDB will remain; no DB changes needed
+
+### Renaming a Sensor Field
+
+1. **Update Telegraf config**: Change the `path` value to match new field name
+2. **Update all Grafana queries**: Search for old field name in dashboard JSON
+3. **Consider migration**: Old data will use old field name; new data uses new name
+
+### Changing Field Data Type
+
+1. **Update Telegraf config**: Change the `type` value (float, int, boolean, string)
+2. **Update Grafana panels**: Ensure visualization supports new type
+3. **Warning**: Type changes may cause InfluxDB conflicts with existing data
+
+### Adding a New MQTT Topic
+
+1. **Update Telegraf config**: Add topic to `topics` array
+2. **Consider**: May need separate `[[inputs.mqtt_consumer.json_v2]]` block for different schema
+
+### Adding a New Tag (Dimension)
+
+1. **Update Telegraf config**:
+   ```toml
+   [[inputs.mqtt_consumer.json_v2.tag]]
+     path = "new_tag"
+   ```
+2. **Update Grafana**: Add template variable for filtering by new tag
+3. **Update dashboard queries**: Include tag in `filter()` or `group()` clauses

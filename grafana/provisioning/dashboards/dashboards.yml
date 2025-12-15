@@ -15,27 +15,3 @@ providers:
     allowUiUpdates: true
     options:
       path: /var/lib/grafana/dashboards/iot
-
-  # Home Assistant > Tesla Powerwall
-  - name: 'Tesla Powerwall'
-    orgId: 1
-    folder: 'Home Assistant/Tesla'
-    folderUid: 'ha-tesla'
-    type: file
-    disableDeletion: false
-    updateIntervalSeconds: 30
-    allowUiUpdates: true
-    options:
-      path: /var/lib/grafana/dashboards/homeassistant/tesla
-
-  # Home Assistant > Emporia Vue
-  - name: 'Emporia Vue'
-    orgId: 1
-    folder: 'Home Assistant/Emporia'
-    folderUid: 'ha-emporia'
-    type: file
-    disableDeletion: false
-    updateIntervalSeconds: 30
-    allowUiUpdates: true
-    options:
-      path: /var/lib/grafana/dashboards/homeassistant/emporia
