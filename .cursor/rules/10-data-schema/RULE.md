@@ -4,7 +4,7 @@ globs: "telegraf/*.conf, grafana/**/*.json"
 alwaysApply: false
 ---
 
-# IoT Data Schema
+# IoT Data Schema Standards
 
 This document defines the canonical sensor data schema and procedures for schema changes.
 
@@ -81,8 +81,6 @@ The JSON payload from IoT devices:
 
 ### Adding a New Sensor Field
 
-When adding a new field to the IoT data payload:
-
 1. **Update Telegraf config** (`telegraf/telegraf.conf`):
    ```toml
    [[inputs.mqtt_consumer.json_v2.field]]
@@ -115,23 +113,96 @@ When adding a new field to the IoT data payload:
 2. **Update all Grafana queries**: Search for old field name in dashboard JSON
 3. **Consider migration**: Old data will use old field name; new data uses new name
 
-### Changing Field Data Type
+---
 
-1. **Update Telegraf config**: Change the `type` value (float, int, boolean, string)
-2. **Update Grafana panels**: Ensure visualization supports new type
-3. **Warning**: Type changes may cause InfluxDB conflicts with existing data
+## Voice Assistant Data Schema
 
-### Adding a New MQTT Topic
+### Audio Processing Schema
+```json
+{
+  "session_id": "string",           // Unique voice session identifier
+  "audio_format": "string",         // WAV, MP3, WebM, etc.
+  "audio_duration_ms": "int",       // Audio clip duration
+  "stt_provider": "string",         // openai, azure, etc.
+  "stt_confidence": "float",        // 0.0 to 1.0 confidence score
+  "stt_text": "string",             // Transcribed text
+  "llm_model": "string",            // GPT model used
+  "llm_tokens": "int",              // Token usage
+  "response_text": "string",        // Generated response
+  "tts_provider": "string",         // openai, azure, etc.
+  "processing_time_ms": "int",      // Total end-to-end time
+  "mcp_commands": "array",          // Home Assistant commands executed
+  "error_type": "string"            // Error classification if failed
+}
+```
 
-1. **Update Telegraf config**: Add topic to `topics` array
-2. **Consider**: May need separate `[[inputs.mqtt_consumer.json_v2]]` block for different schema
+### Home Assistant Integration Schema
+```json
+{
+  "command_type": "string",         // light, climate, media_player, etc.
+  "entity_id": "string",            // homeassistant entity identifier
+  "action": "string",               // turn_on, turn_off, set_temperature, etc.
+  "parameters": "object",           // Action-specific parameters
+  "success": "boolean",             // Command execution result
+  "response_time_ms": "int",        // HA API response time
+  "error_message": "string"         // Error details if failed
+}
+```
 
-### Adding a New Tag (Dimension)
+---
 
-1. **Update Telegraf config**:
-   ```toml
-   [[inputs.mqtt_consumer.json_v2.tag]]
-     path = "new_tag"
-   ```
-2. **Update Grafana**: Add template variable for filtering by new tag
-3. **Update dashboard queries**: Include tag in `filter()` or `group()` clauses
+## Data Quality Standards
+
+### Validation Rules
+- **Device ID**: Must be unique, alphanumeric with hyphens/underscores
+- **Temperature**: -50°C to 100°C (-58°F to 212°F) range validation
+- **Humidity**: 0-100% range validation
+- **Timestamps**: Must be valid ISO 8601 format
+- **IP Addresses**: Must be valid IPv4 format when present
+
+### Data Retention Policies
+- **Raw sensor data**: 1 year retention
+- **Aggregated data**: 5 year retention
+- **Voice interaction logs**: 90 days retention (privacy compliance)
+- **System metrics**: 1 year retention
+
+---
+
+## Schema Evolution Guidelines
+
+### Backward Compatibility
+- New fields must be optional in Telegraf configuration
+- Grafana queries must handle missing fields gracefully
+- API consumers must tolerate unknown fields
+
+### Versioning Strategy
+- Schema changes tracked in CHANGELOG.md
+- Major changes require version bump
+- Breaking changes require migration documentation
+
+### Testing Schema Changes
+- Unit tests for new field validation
+- Integration tests for end-to-end data flow
+- Grafana dashboard rendering tests
+- Backward compatibility regression tests
+
+---
+
+## ADR References
+
+- **ADR-022**: IoT Backend Integration (voice_assistant/docs/architecture/adr/)
+  - Governs how voice data integrates with IoT schema
+  - Defines separation between IoT sensor data and voice analytics
+
+---
+
+## Maintenance Checklist
+
+After schema changes:
+- [ ] Telegraf configuration updated with new fields
+- [ ] Grafana dashboards updated with new queries
+- [ ] CHANGELOG.md updated with schema changes
+- [ ] Tests updated for new validation rules
+- [ ] Documentation updated for new fields
+- [ ] Cross-repository coordination completed
+- [ ] Voice assistant schema compatibility verified

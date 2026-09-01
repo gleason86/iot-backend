@@ -1,0 +1,11 @@
+# Cursor ignore patterns for iot-backend
+# This file allows Cursor agent to access sensitive files for development
+
+# Allow access to environment files (normally blocked for security)
+!.env
+
+# Allow access to password files (normally blocked for security)
+!mosquitto/password.txt
+
+# Allow access to credential files
+!credentials/*.yaml

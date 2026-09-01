@@ -129,3 +129,54 @@ environment:
 secrets:
   - db_password  # Docker secrets (production)
 ```
+
+---
+
+## Voice Assistant Security Considerations
+
+### API Key Management
+- OpenAI API keys should be stored in `credentials/openai_api.yaml` (gitignored)
+- Azure Speech credentials in `credentials/azure_speech.yaml` (gitignored)
+- Home Assistant tokens in `credentials/ha_api.yaml` (gitignored)
+
+### Container Security
+- Voice services run in isolated containers
+- WebRTC connections use secure protocols in production
+- MCP server authentication required for Home Assistant access
+
+### Network Security
+- Voice services communicate over dedicated `voice-network`
+- WebSocket connections should use WSS in production
+- API endpoints should validate authentication tokens
+
+---
+
+## Security Validation Checklist
+
+Before deployment:
+
+- [ ] All secrets use environment variables, no hardcoded values
+- [ ] `.env` file is gitignored and not committed
+- [ ] Example files contain only placeholder values
+- [ ] Docker volumes use read-only mounts where appropriate
+- [ ] Network isolation configured for sensitive services
+- [ ] Voice assistant credentials properly secured
+- [ ] API keys validated and have appropriate permissions
+- [ ] Home Assistant tokens have minimal required permissions
+
+---
+
+## Incident Response
+
+### Credential Exposure
+1. **Immediately rotate** all exposed credentials
+2. **Audit access logs** for unauthorized usage
+3. **Update deployment** with new credentials
+4. **Review process** that led to exposure
+
+### Security Breach
+1. **Isolate affected systems** immediately
+2. **Preserve evidence** for forensic analysis
+3. **Notify stakeholders** according to incident response plan
+4. **Implement fixes** and preventive measures
+5. **Conduct post-mortem** to improve security processes
