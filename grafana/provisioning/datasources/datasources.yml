@@ -1,10 +1,13 @@
 # Grafana Datasource Provisioning
-# Auto-configures InfluxDB connection on startup
+# Auto-configures the InfluxDB connection on startup.
+# The token comes from the container environment (INFLUXDB_READ_TOKEN in .env,
+# passed through docker-compose.yml) — never put a literal token in this file.
 
 apiVersion: 1
 
 datasources:
   - name: InfluxDB
+    uid: P951FEA4DE68E13C5   # existing datasource uid in grafana_data; dashboards reference it
     type: influxdb
     access: proxy
     url: http://influxdb:8086
@@ -14,8 +17,6 @@ datasources:
       defaultBucket: iot
       tlsSkipVerify: true
     secureJsonData:
-      token: $INFLUXDB_ADMIN_TOKEN
+      token: $INFLUXDB_READ_TOKEN
     isDefault: true
-    editable: true
-
-
+    editable: false
