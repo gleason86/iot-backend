@@ -26,7 +26,6 @@ if (-not (Test-Path $envFile)) {
     $mqttPassword = -join ((65..90) + (97..122) + (48..57) | Get-Random -Count 24 | ForEach-Object {[char]$_})
     $influxPassword = -join ((65..90) + (97..122) + (48..57) | Get-Random -Count 24 | ForEach-Object {[char]$_})
     $influxToken = -join ((65..90) + (97..122) + (48..57) | Get-Random -Count 48 | ForEach-Object {[char]$_})
-    $grafanaPassword = -join ((65..90) + (97..122) + (48..57) | Get-Random -Count 16 | ForEach-Object {[char]$_})
     
     $envContent = @"
 # IoT Backend Environment Configuration
@@ -47,11 +46,7 @@ INFLUXDB_ORG=home
 INFLUXDB_BUCKET=iot
 INFLUXDB_ADMIN_TOKEN=$influxToken
 
-# =============================================================================
-# Grafana
-# =============================================================================
-GRAFANA_ADMIN_USER=admin
-GRAFANA_ADMIN_PASSWORD=$grafanaPassword
+# Grafana lives in ..\grafana (own .env there).
 "@
     
     $envContent | Out-File -FilePath $envFile -Encoding utf8 -NoNewline
@@ -59,7 +54,6 @@ GRAFANA_ADMIN_PASSWORD=$grafanaPassword
     Write-Host ""
     Write-Host "IMPORTANT: Save these credentials!" -ForegroundColor Yellow
     Write-Host "  MQTT Password: $mqttPassword" -ForegroundColor White
-    Write-Host "  Grafana Password: $grafanaPassword" -ForegroundColor White
 } else {
     Write-Host "[OK] .env file already exists" -ForegroundColor Green
 }
@@ -95,8 +89,8 @@ Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
 Write-Host "  1. cd to iot-backend directory"
 Write-Host "  2. Run: docker compose up -d"
-Write-Host "  3. Access Grafana at: http://localhost:3000"
-Write-Host "  4. Access InfluxDB at: http://localhost:8086"
+Write-Host "  3. Access InfluxDB at: http://localhost:8086"
+Write-Host "  4. Grafana: cd ..\grafana; docker compose up -d  (http://localhost:3000)"
 Write-Host ""
 
 

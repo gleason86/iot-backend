@@ -1,9 +1,10 @@
 # IoT Backend
 
-Docker Compose stack on the Ryzen PC (`192.168.1.100`, static) that stores and
-visualises home sensor data: an MQTT broker, InfluxDB, a Telegraf pipeline between
-them, and Grafana. It is also the InfluxDB that Home Assistant (on the Pi,
-`192.168.1.110`) mirrors its state history into.
+Docker Compose stack on the Ryzen PC (`192.168.1.100`, static) that stores home
+sensor data: an MQTT broker, InfluxDB, and a Telegraf pipeline between them. It is
+also the InfluxDB that Home Assistant (on the Pi, `192.168.1.110`) mirrors its state
+history into, and that the Networking repo's modem poller writes to. Grafana, which
+reads all of it, lives in its own repo: `../grafana` (since 2026-09-08).
 
 > **History:** in Dec 2025 this repo also carried a voice-assistant stack (gateway,
 > two engines, web UI, ChromaDB, a Home Assistant MCP bridge, Prometheus). That
@@ -13,9 +14,10 @@ them, and Grafana. It is also the InfluxDB that Home Assistant (on the Pi,
 ## Architecture
 
 ```
-Arduino Uno R4 WiFi ──MQTT──▶ Mosquitto ──▶ Telegraf ──▶ InfluxDB ◀── Grafana
+Arduino Uno R4 WiFi ──MQTT──▶ Mosquitto ──▶ Telegraf ──▶ InfluxDB ◀── Grafana (../grafana)
                                                              ▲
-Home Assistant (Pi) ──influxdb: integration──────────────────┘
+Home Assistant (Pi) ──influxdb: integration──────────────────┤
+Networking/modem-status.py ──bucket network──────────────────┘
 ```
 
 ## Services
@@ -23,9 +25,11 @@ Home Assistant (Pi) ──influxdb: integration───────────
 | Service   | Container       | Port        | Description                                   |
 |-----------|-----------------|-------------|-----------------------------------------------|
 | Mosquitto | `iot-mosquitto` | 1883 / 9001 | MQTT broker (password auth; 9001 = websockets) |
-| InfluxDB  | `iot-influxdb`  | 8086        | InfluxDB 2.x, org `home`, bucket `iot`         |
+| InfluxDB  | `iot-influxdb`  | 8086        | InfluxDB 2.x, org `home`, buckets `iot`, `network`, `voice_telemetry` |
 | Telegraf  | `iot-telegraf`  | —           | MQTT `iot/sensors/+/{data,status}` → InfluxDB  |
-| Grafana   | `iot-grafana`   | 3000        | Dashboards (provisioned from `grafana/`)       |
+
+Grafana (`grafana`, port 3000) is run from `../grafana` and joins this stack's
+`iot-backend_iot-network` as an external network. Start this stack first.
 
 All services use rotated JSON logs (`10m` × 3) via the `x-logging` anchor in
 `docker-compose.yml`. An unrotated log once grew to 1 TB and filled the Docker
@@ -38,16 +42,20 @@ cp env.example.txt .env      # then fill in credentials
 docker compose up -d
 ```
 
-Grafana reads InfluxDB with `INFLUXDB_READ_TOKEN` (a read-only token). After the
-first start, create one and add it to `.env`:
+InfluxDB tokens are one per consumer, created with the operator token that stays
+inside the container (the CLI profile there is stale and 401s without `-t`):
 
 ```powershell
-docker exec iot-influxdb influx auth create --org home --read-bucket <iot bucket id> --description grafana
+docker exec iot-influxdb sh -c 'influx auth list -t "$DOCKER_INFLUXDB_INIT_ADMIN_TOKEN"'
+docker exec iot-influxdb sh -c 'influx auth create -o home -t "$DOCKER_INFLUXDB_INIT_ADMIN_TOKEN" --write-bucket <bucket id> --description "<consumer> write-only, <bucket>"'
 ```
 
-- **Grafana**: http://localhost:3000 (admin / see `.env`; anonymous viewers allowed)
+Current consumers: Telegraf (write `iot`), Home Assistant (write `iot`), the
+Networking modem poller (write `network`), Grafana (read all; token kept in
+`../grafana/.env`).
+
 - **InfluxDB**: http://localhost:8086
-- Ports 3000 and 9090 are blocked from the LAN by Windows Firewall; 1883 and 8086
+- Port 3000 (Grafana) is blocked from the LAN by Windows Firewall; 1883 and 8086
   are reachable from the LAN (both require credentials).
 
 ## MQTT topics
@@ -93,8 +101,9 @@ from(bucket: "iot")
 docker compose ps
 docker compose logs -f mosquitto     # client connects / auth failures
 docker compose logs -f telegraf      # MQTT → Influx pipeline
-docker compose logs -f grafana       # provisioning errors
 ```
+
+Grafana problems: `cd ../grafana && python tools/grafana.py health`.
 
 ```flux
 // Arduino data arriving?
@@ -109,9 +118,6 @@ iot-backend/
 ├── env.example.txt
 ├── mosquitto/          # mosquitto.conf, password.txt (gitignored) + example
 ├── telegraf/telegraf.conf
-├── grafana/
-│   ├── dashboards/iot/iot-sensors.json
-│   └── provisioning/   # datasource + dashboard providers
 └── scripts/            # setup / start / stop / troubleshoot (PowerShell)
 ```
 

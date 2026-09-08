@@ -61,7 +61,6 @@ function Analyze-FileChanges {
 
         # Services that need rebuild for config changes
         "telegraf" = @("telegraf/telegraf.conf")
-        "grafana" = @("grafana/**/*.json", "grafana/**/*.yaml", "grafana/**/*.yml")
         "mosquitto" = @("mosquitto/mosquitto.conf", "mosquitto/password.txt")
 
         # Infrastructure services (rarely need rebuild)
@@ -71,7 +70,6 @@ function Analyze-FileChanges {
     $restartMap = @{
         # Services that only need restart for config changes
         "telegraf" = @("telegraf/telegraf.conf")
-        "grafana" = @("grafana/**/*.yaml", "grafana/**/*.yml")
         "mosquitto" = @("mosquitto/mosquitto.conf")
     }
 

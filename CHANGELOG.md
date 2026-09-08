@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.0] - 2026-09-08
+
+### Removed
+- **Grafana** moved to its own repo, `../grafana` (Grafana 13.2.1 on a fresh volume,
+  joining `iot-backend_iot-network` as an external network). The `grafana` service,
+  `grafana/` directory, `grafana_data` volume declaration and the `GRAFANA_*` /
+  `INFLUXDB_READ_TOKEN` variables are gone from here. The old `iot-grafana`
+  container was removed; the `iot-backend_grafana_data` volume is left for manual
+  deletion. Reason: dashboards now span iot-backend, homeassistant and Networking.
+
+### Security
+- Grafana's read-only InfluxDB token replaced by one that also covers the `network`
+  bucket (`grafana read-only (iot, network, voice_telemetry)`); the old
+  `grafana read-only (iot, voice_telemetry)` auth deleted.
+
 ## [0.3.0] - 2026-08-31
 
 ### Removed

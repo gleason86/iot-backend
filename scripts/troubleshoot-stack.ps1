@@ -54,7 +54,6 @@ Write-Host ""
 # Test core services
 Test-ServiceHealth -ServiceName "Mosquitto" -ContainerName "mosquitto"
 Test-ServiceHealth -ServiceName "InfluxDB" -ContainerName "influxdb"
-Test-ServiceHealth -ServiceName "Grafana" -ContainerName "grafana"
 Test-ServiceHealth -ServiceName "Telegraf" -ContainerName "telegraf"
 
 # Summary

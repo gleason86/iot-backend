@@ -3,6 +3,7 @@
 #
 # 2026-08-31: voice-assistant stack (gateway, engines, UI, ChromaDB, HA-MCP bridge,
 # Prometheus) removed — project parked, resources reclaimed. See CHANGELOG.
+# 2026-09-08: Grafana moved to its own repo (~/Repos/grafana). See CHANGELOG 0.4.0.
 
 # Every service gets rotated JSON logs. An unrotated voice-gateway log grew to
 # 1.04 TB and filled the Docker VM disk in Jan 2026 — never run without this.
@@ -77,32 +78,8 @@ services:
     networks:
       - iot-network
 
-  # =========================================================================
-  # Visualization
-  # =========================================================================
-  grafana:
-    image: grafana/grafana:latest
-    container_name: iot-grafana
-    restart: unless-stopped
-    logging: *default-logging
-    depends_on:
-      - influxdb
-    ports:
-      - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER}
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
-      - GF_AUTH_ANONYMOUS_ENABLED=true
-      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
-      - INFLUXDB_READ_TOKEN=${INFLUXDB_READ_TOKEN:?set INFLUXDB_READ_TOKEN in .env (read-only Influx token for Grafana)}
-      # No GF_INSTALL_PLUGINS: a failed plugin download/extract aborts Grafana
-      # startup, and no provisioned dashboard uses one.
-    volumes:
-      - grafana_data:/var/lib/grafana
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
-    networks:
-      - iot-network
+  # Grafana moved to ~/Repos/grafana on 2026-09-08; its container joins
+  # this stack's network (iot-backend_iot-network) as an external network.
 
 networks:
   iot-network:
@@ -113,4 +90,3 @@ volumes:
   mosquitto_log:
   influxdb_data:
   influxdb_config:
-  grafana_data:

@@ -1,13 +1,14 @@
 # Restart Data Path
 
-Restart Telegraf and Grafana containers.
+Restart the Telegraf container. (Grafana lives in `..\grafana`; its provisioning
+reloads from files on its own, and `.env` changes need `docker compose up -d` there.)
 
 ## Usage
-Use after Telegraf/Grafana config changes.
+Use after Telegraf config changes.
 
 ## Command
 ```powershell
-cd C:\Users\david\Repos\iot-backend; docker compose restart telegraf grafana
+cd C:\Users\david\Repos\iot-backend; docker compose restart telegraf
 ```
 
 ## Notes

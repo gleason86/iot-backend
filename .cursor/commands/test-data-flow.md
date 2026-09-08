@@ -46,8 +46,9 @@ docker compose exec -T influxdb influx query $fluxQuery
 ```
 
 ### 4. Grafana Accessibility Check
+Grafana is run from `..\grafana` (own repo since 2026-09-08); the same port applies.
 ```powershell
-# Test Grafana health endpoint
+# Test Grafana health endpoint (or: cd ..\grafana; python tools\grafana.py health)
 Invoke-WebRequest -Uri "http://localhost:3000/api/health"
 ```
 

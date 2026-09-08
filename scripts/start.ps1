@@ -13,7 +13,7 @@ try {
         Write-Host "Services started successfully!" -ForegroundColor Green
         Write-Host ""
         Write-Host "Access points:" -ForegroundColor Cyan
-        Write-Host "  Grafana:  http://localhost:3000" -ForegroundColor White
+        Write-Host "  Grafana:  http://localhost:3000 (run from ..\grafana: docker compose up -d)" -ForegroundColor White
         Write-Host "  InfluxDB: http://localhost:8086" -ForegroundColor White
         Write-Host "  MQTT:     localhost:1883" -ForegroundColor White
         Write-Host ""
