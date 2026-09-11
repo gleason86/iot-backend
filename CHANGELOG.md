@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- Verified encrypted InfluxDB/MQTT recovery, daily independent copies, a disabled
+  native Threadripper standby, read-only freshness monitoring and disposable
+  partition/crash/failback/buffer-full/disk-full drills. See the September 11
+  recovery record for exact scope, credentials locations and remaining limits.
+
 ## [0.4.0] - 2026-09-08
 
 ### Removed

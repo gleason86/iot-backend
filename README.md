@@ -1,5 +1,10 @@
 # IoT Backend
 
+Verified independent InfluxDB/MQTT backups, a disabled Threadripper cold standby,
+and read-only freshness monitoring are documented in
+[recovery and continuity](docs/recovery-and-continuity-2026-09-11.md). Production
+placement is unchanged; automatic failover is not enabled.
+
 Docker Compose stack on the Ryzen PC (`192.168.1.100`, static) that stores home
 sensor data: an MQTT broker, InfluxDB, and a Telegraf pipeline between them. It is
 also the InfluxDB that Home Assistant (on the Pi, `192.168.1.110`) mirrors its state
