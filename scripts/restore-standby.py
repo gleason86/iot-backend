@@ -13,6 +13,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--checkpoint', type=Path, required=True)
     parser.add_argument('--verify-only', action='store_true')
+    parser.add_argument('--resume-setup', action='store_true', help='Resume only an untouched restore-drill organization')
     args = parser.parse_args()
     expected = json.loads((args.checkpoint / 'verification.json').read_bytes())
     token = (args.checkpoint / 'credentials/influx-operator-token').read_bytes().decode()
@@ -34,7 +35,12 @@ def main():
             break
         except OSError: time.sleep(1)
     else: raise RuntimeError('Standby startup timed out')
-    if not allowed and not args.verify_only: raise RuntimeError('Refusing to overwrite an initialized server')
+    if not allowed and not args.verify_only:
+        if not args.resume_setup:
+            raise RuntimeError('Refusing to overwrite an initialized server')
+        organizations = json.loads(cli('org', 'list', '--json'))
+        if len(organizations) != 1 or organizations[0]['name'] != 'restore-drill':
+            raise RuntimeError('Resume is restricted to initial disposable setup metadata')
     import secrets
     payload = dict(username='restore-drill', password=secrets.token_urlsafe(32),
                    org='restore-drill', bucket='restore-drill', token=token)
@@ -42,7 +48,8 @@ def main():
         data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json'})
     started = time.monotonic()
     if not args.verify_only:
-        with opener.open(req, timeout=15): pass
+        if allowed:
+            with opener.open(req, timeout=15): pass
         cli('restore', '--full', str(args.checkpoint / 'backup'))
     env['INFLUX_ORG'] = 'home'
     buckets = json.loads(cli('bucket', 'list', '--org', 'home', '--json'))

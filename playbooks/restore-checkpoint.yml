@@ -7,6 +7,7 @@
     checkpoint_archive: /home/david/inference-20260911/iot-recovery-encrypted.tar
     checkpoint_key_source: /home/david/inference-20260911/influx-restic-password
     checkpoint_snapshot: 7bd6662f1ec9735223c9ff0366d963a96cfccbe5ea554447edc6249f2d7b210e
+    standby_resume_setup: false
   tasks:
     - name: Refuse existing recovery destination
       ansible.builtin.stat:
@@ -55,7 +56,7 @@
             state: started
         - name: Restore with original identities and query as Grafana
           ansible.builtin.command:
-            argv: [python3, '{{ playbook_dir }}/../scripts/restore-standby.py', --checkpoint, '{{ checkpoint_root }}/restored/checkpoint']
+            argv: '{{ ["python3", playbook_dir + "/../scripts/restore-standby.py", "--checkpoint", checkpoint_root + "/restored/checkpoint"] + (["--resume-setup"] if standby_resume_setup | bool else []) }}'
           register: native_restore
           changed_when: true
         - name: Restart restored standby
