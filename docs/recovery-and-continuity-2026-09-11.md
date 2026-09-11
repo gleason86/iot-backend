@@ -132,6 +132,19 @@ restarting only influxd, preserving that filesystem, allowed an idempotent retry
 and exactly one final row. This exercises real ENOSPC in a disposable filesystem,
 not a full production SSD or physical power loss.
 
+At 08:11:16 UTC, `python tests/persistent_buffer_drill.py` tested experimental
+Telegraf 1.32.3 disk buffering in a separate disposable named volume. After
+SIGKILL and complete collector-container replacement, the empty-source replacement
+replayed all ten fixture field rows in 3.016 seconds. The queue used 26,992 bytes.
+Ten rows survived despite `metric_buffer_limit=3`; this setting does not provide
+the required disk-space bound. Fixed timestamps let Influx deduplicate repeated
+input samples, so transport exactly-once delivery is not proven. The initial
+fixture could not attach an internal network while Docker's `none` network was
+still attached; the corrected test detaches it first and all resources were removed.
+No production buffer setting changed. Physical power loss, bounded disk-full
+behavior, cross-host queue transfer and transactional event-baseline replay remain
+unproven. See the [versioned buffer configuration](https://raw.githubusercontent.com/influxdata/telegraf/v1.32.3/docs/CONFIGURATION.md).
+
 Official references: [full restore](https://docs.influxdata.com/influxdb/v2/admin/backup-restore/restore/),
 [replication semantics](https://docs.influxdata.com/influxdb/v2/write-data/replication/replicate-data/),
 [2.7.12 implementation](https://raw.githubusercontent.com/influxdata/influxdb/v2.7.12/replications/service.go),
