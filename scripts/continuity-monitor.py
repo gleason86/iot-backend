@@ -33,8 +33,8 @@ def query(config, bucket):
     names = [key.split(':', 1)[1] for key in THRESHOLDS if key.startswith(bucket + ':')]
     flux = ('from(bucket:' + json.dumps(bucket) + ') |> range(start:-1h) '
             '|> filter(fn:(r)=>contains(value:r._measurement,set:' + json.dumps(names) + ')) '
-            '|> group(columns:["_measurement"]) |> max(column:"_time") '
-            '|> keep(columns:["_measurement","_time"])')
+            '|> keep(columns:["_measurement","_time"]) '
+            '|> group(columns:["_measurement"]) |> sort(columns:["_time"],desc:true) |> limit(n:1)')
     req = urllib.request.Request(config['url'] + '/api/v2/query?org=home', data=flux.encode(),
           headers={'Authorization': 'Token ' + config['token'], 'Content-Type': 'application/vnd.flux'})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
@@ -72,7 +72,7 @@ def main():
                 failures.append(dict(producer=key, reason='missing-or-stale', age_seconds=age))
     except Exception as exc:
         values = {}
-        failures = [dict(producer='backend', reason=type(exc).__name__)]
+        failures = [dict(producer='backend', reason=type(exc).__name__, http_status=getattr(exc, 'code', None))]
     state = transition(previous, failures, now)
     state['watermarks'] = values
     args.state.parent.mkdir(parents=True, exist_ok=True)

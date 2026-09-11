@@ -14,12 +14,13 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
 DEST = Path('D:/Backups/iot-backend')
-SSH = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'HostKeyAlias=192.168.1.105']
+SSH = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15',
+       '-o', 'ServerAliveCountMax=2', '-o', 'HostKeyAlias=192.168.1.105']
 HOST = 'david@192.168.1.106'
 
 
 def cmd(args, timeout=600):
-    p = subprocess.run(args, capture_output=True, timeout=timeout)
+    p = subprocess.run(args, capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL)
     if p.returncode: raise RuntimeError('Recovery stage failed; private output withheld')
     return p.stdout.decode()
 
