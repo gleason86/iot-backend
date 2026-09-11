@@ -7,3 +7,8 @@
         src: ../roles/standby/templates/influxdb-standby.service.j2
         dest: /tmp/influxdb-standby.service
         mode: '0644'
+    - ansible.builtin.template:
+        src: '../roles/monitor/templates/{{ item }}.j2'
+        dest: '/tmp/{{ item }}'
+        mode: '0644'
+      loop: [continuity-monitor.service, continuity-monitor.timer]

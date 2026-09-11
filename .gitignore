@@ -47,3 +47,5 @@ Thumbs.db
 # Logs (may contain sensitive information)
 *.log
 logs/
+__pycache__/
+*.pyc

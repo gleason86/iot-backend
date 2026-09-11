@@ -1,0 +1,7 @@
+.git
+.env
+secrets
+data
+.agents
+**/__pycache__
+mosquitto/password.txt

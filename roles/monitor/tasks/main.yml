@@ -1,0 +1,55 @@
+- name: Create dedicated read-only monitor identity
+  ansible.builtin.user:
+    name: continuity-monitor
+    system: true
+    home: /srv/continuity-monitor
+    shell: /usr/sbin/nologin
+    create_home: false
+- name: Create private monitor state
+  ansible.builtin.file:
+    path: /srv/continuity-monitor
+    state: directory
+    owner: continuity-monitor
+    group: continuity-monitor
+    mode: '0700'
+- name: Create monitor runtime and config directories
+  ansible.builtin.file:
+    path: '{{ item }}'
+    state: directory
+    mode: '0755'
+  loop: [/opt/continuity-monitor, /etc/continuity-monitor]
+- name: Install read-only checker
+  ansible.builtin.copy:
+    src: '{{ role_path }}/../../scripts/continuity-monitor.py'
+    dest: /opt/continuity-monitor/check.py
+    mode: '0644'
+- name: Install dedicated read credential
+  ansible.builtin.copy:
+    src: '{{ monitor_config_source }}'
+    dest: /etc/continuity-monitor/config.json
+    owner: root
+    group: continuity-monitor
+    mode: '0640'
+  no_log: true
+- name: Bound monitoring logs
+  ansible.builtin.copy:
+    dest: /etc/systemd/journald@continuity-monitor.conf
+    mode: '0644'
+    content: |
+      [Journal]
+      SystemMaxUse=20M
+      RuntimeMaxUse=10M
+      MaxRetentionSec=7day
+- name: Install health service and timer
+  ansible.builtin.template:
+    src: '{{ item }}.j2'
+    dest: '/etc/systemd/system/{{ item }}'
+    mode: '0644'
+  loop: [continuity-monitor.service, continuity-monitor.timer]
+- name: Enable independent read-only checks
+  ansible.builtin.systemd_service:
+    name: continuity-monitor.timer
+    daemon_reload: true
+    state: started
+    enabled: true
+  when: not ansible_check_mode

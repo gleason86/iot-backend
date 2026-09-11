@@ -1,0 +1,20 @@
+[Unit]
+Description=Independent read-only backend and producer freshness check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=continuity-monitor
+ExecStart=/usr/bin/python3 /opt/continuity-monitor/check.py --config /etc/continuity-monitor/config.json --state /srv/continuity-monitor/health.json
+TimeoutStartSec=30s
+MemoryMax=128M
+CPUQuota=25%
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/continuity-monitor
+IPAddressDeny=any
+IPAddressAllow=192.168.1.100
+LogNamespace=continuity-monitor
