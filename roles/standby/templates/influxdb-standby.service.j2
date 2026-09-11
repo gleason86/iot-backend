@@ -1,0 +1,27 @@
+[Unit]
+Description=Isolated InfluxDB recovery standby (no automatic promotion)
+
+[Service]
+User=influxdb-standby
+Group=influxdb-standby
+ExecStart={{ standby_runtime }}/influxd --bolt-path {{ standby_root }}/influxd.bolt --engine-path {{ standby_root }}/engine --sqlite-path {{ standby_root }}/influxd.sqlite --http-bind-address 127.0.0.1:8086 --reporting-disabled
+WorkingDirectory={{ standby_root }}
+Restart=no
+MemoryHigh=1500M
+MemoryMax=2G
+MemorySwapMax=0
+CPUQuota=200%
+TasksMax=256
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={{ standby_root }}
+IPAddressDeny=any
+IPAddressAllow=localhost
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=100
+
+[Install]
+WantedBy=multi-user.target

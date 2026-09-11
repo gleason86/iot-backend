@@ -1,0 +1,81 @@
+- name: Verify independent encrypted checkpoint and native standby restoration
+  hosts: threadripper
+  become: true
+  gather_facts: false
+  vars:
+    checkpoint_root: /srv/iot-recovery
+    checkpoint_archive: /home/david/inference-20260911/iot-recovery-encrypted.tar
+    checkpoint_key_source: /home/david/inference-20260911/influx-restic-password
+    checkpoint_snapshot: 7bd6662f1ec9735223c9ff0366d963a96cfccbe5ea554447edc6249f2d7b210e
+  tasks:
+    - name: Refuse existing recovery destination
+      ansible.builtin.stat:
+        path: '{{ checkpoint_root }}'
+      register: checkpoint_existing
+    - name: Require new isolated destination
+      ansible.builtin.assert:
+        that:
+          - not checkpoint_existing.stat.exists
+          - checkpoint_root == '/srv/iot-recovery'
+    - name: Create independent private backup paths
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: directory
+        mode: '0700'
+      loop: ['{{ checkpoint_root }}', /etc/influxdb-standby]
+    - name: Store independent backup credential
+      ansible.builtin.copy:
+        src: '{{ checkpoint_key_source }}'
+        dest: /etc/influxdb-standby/backup-password
+        mode: '0600'
+      no_log: true
+    - name: Extract encrypted repository only
+      ansible.builtin.unarchive:
+        src: '{{ checkpoint_archive }}'
+        dest: '{{ checkpoint_root }}'
+        remote_src: true
+    - name: Verify every encrypted pack on the independent host
+      ansible.builtin.command: restic check --read-data
+      environment:
+        RESTIC_REPOSITORY: '{{ checkpoint_root }}/repository'
+        RESTIC_PASSWORD_FILE: /etc/influxdb-standby/backup-password
+      changed_when: false
+    - name: Restore authenticated checkpoint into isolated private path
+      ansible.builtin.command:
+        argv: [restic, restore, '{{ checkpoint_snapshot }}', --target, '{{ checkpoint_root }}/restored', --verify]
+      environment:
+        RESTIC_REPOSITORY: '{{ checkpoint_root }}/repository'
+        RESTIC_PASSWORD_FILE: /etc/influxdb-standby/backup-password
+      changed_when: true
+    - name: Exercise native standby without enabling it or altering client routes
+      block:
+        - name: Start local-only standby for restore drill
+          ansible.builtin.systemd_service:
+            name: influxdb-standby
+            state: started
+        - name: Restore with original identities and query as Grafana
+          ansible.builtin.command:
+            argv: [python3, '{{ playbook_dir }}/../scripts/restore-standby.py', --checkpoint, '{{ checkpoint_root }}/restored/checkpoint']
+          register: native_restore
+          changed_when: true
+        - name: Restart restored standby
+          ansible.builtin.systemd_service:
+            name: influxdb-standby
+            state: restarted
+        - name: Verify restored data and read credential after restart
+          ansible.builtin.command:
+            argv: [python3, '{{ playbook_dir }}/../scripts/restore-standby.py', --checkpoint, '{{ checkpoint_root }}/restored/checkpoint', --verify-only]
+          register: native_restart
+          changed_when: false
+        - name: Save safe aggregate drill results
+          ansible.builtin.copy:
+            dest: '{{ checkpoint_root }}/standby-verification.json'
+            mode: '0640'
+            group: david
+            content: '{{ {"restore": native_restore.stdout | from_json, "restart": native_restart.stdout | from_json} | to_nice_json }}'
+      always:
+        - name: Leave recovered standby stopped and disabled
+          ansible.builtin.systemd_service:
+            name: influxdb-standby
+            state: stopped
+            enabled: false

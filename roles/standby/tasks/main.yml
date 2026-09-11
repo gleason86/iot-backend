@@ -1,0 +1,72 @@
+- name: Verify supplied runtime binaries from pinned production image
+  ansible.builtin.stat:
+    path: '{{ standby_runtime_source }}/{{ item.name }}'
+    checksum_algorithm: sha256
+  loop:
+    - {name: influx, sha: d92421584132219500587f364794249dde338fccd0ac8e4a06dfdd5d5997c89e}
+    - {name: influxd, sha: c7b2b83976f5f5971a3fee323f2f0baf6a3f9b0f692a1efadf8756da90b8766f}
+  register: standby_binaries
+
+- name: Require pinned runtime checksums
+  ansible.builtin.assert:
+    that: item.stat.checksum == item.item.sha
+  loop: '{{ standby_binaries.results }}'
+  loop_control:
+    label: '{{ item.item.name }}'
+
+- name: Verify OS backing filesystem
+  ansible.builtin.command: 'findmnt -n -o SOURCE,FSTYPE -T {{ item }}'
+  loop: ['/', '/srv', '/opt']
+  register: standby_mounts
+  changed_when: false
+  check_mode: false
+
+- name: Require existing OS filesystem
+  ansible.builtin.assert:
+    that:
+      - standby_mounts.results[0].stdout == standby_mounts.results[1].stdout
+      - standby_mounts.results[0].stdout == standby_mounts.results[2].stdout
+      - "'ext4' in standby_mounts.results[0].stdout"
+
+- name: Create standby identity
+  ansible.builtin.user:
+    name: influxdb-standby
+    system: true
+    home: '{{ standby_root }}'
+    shell: /usr/sbin/nologin
+    create_home: false
+
+- name: Create private standby storage
+  ansible.builtin.file:
+    path: '{{ standby_root }}'
+    state: directory
+    owner: influxdb-standby
+    group: influxdb-standby
+    mode: '0700'
+
+- name: Create pinned runtime directory
+  ansible.builtin.file:
+    path: '{{ standby_runtime }}'
+    state: directory
+    mode: '0755'
+
+- name: Install verified native executables
+  ansible.builtin.copy:
+    src: '{{ standby_runtime_source }}/{{ item }}'
+    dest: '{{ standby_runtime }}/{{ item }}'
+    mode: '0755'
+  loop: [influx, influxd]
+
+- name: Install local-only disabled standby unit
+  ansible.builtin.template:
+    src: influxdb-standby.service.j2
+    dest: /etc/systemd/system/influxdb-standby.service
+    mode: '0644'
+
+- name: Keep standby disabled and stopped until an explicit drill
+  ansible.builtin.systemd_service:
+    name: influxdb-standby
+    enabled: false
+    state: stopped
+    daemon_reload: true
+  when: not ansible_check_mode

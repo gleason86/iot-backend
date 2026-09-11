@@ -1,0 +1,4 @@
+standby_runtime_source: /home/david/inference-20260911/runtime-2.7.12
+standby_root: /srv/influxdb-standby
+standby_runtime: /opt/influxdb-2.7.12
+standby_restore_checkpoint: false

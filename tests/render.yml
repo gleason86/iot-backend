@@ -1,0 +1,9 @@
+- hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files: [../roles/standby/defaults/main.yml]
+  tasks:
+    - ansible.builtin.template:
+        src: ../roles/standby/templates/influxdb-standby.service.j2
+        dest: /tmp/influxdb-standby.service
+        mode: '0644'
