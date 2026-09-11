@@ -18,10 +18,13 @@ def main():
     token = (args.checkpoint / 'credentials/influx-operator-token').read_bytes().decode()
     runtime = '/opt/influxdb-2.7.12/influx'
     env = dict(os.environ, INFLUX_HOST='http://127.0.0.1:8086', INFLUX_TOKEN=token,
-               INFLUX_ORG='home', INFLUX_CONFIGS_PATH='/tmp/standby-influx-config')
+               INFLUX_CONFIGS_PATH='/tmp/standby-influx-config')
+    env.pop('INFLUX_ORG', None)
     def cli(*cmd):
         p = subprocess.run([runtime, *cmd], env=env, capture_output=True, timeout=180)
-        if p.returncode: raise RuntimeError('Standby CLI failed; details withheld')
+        if p.returncode:
+            message = p.stderr.decode(errors='replace').replace(token, '[redacted]')
+            raise RuntimeError('Standby CLI failed: ' + message[:1000])
         return p.stdout
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     for _ in range(60):
@@ -41,6 +44,7 @@ def main():
     if not args.verify_only:
         with opener.open(req, timeout=15): pass
         cli('restore', '--full', str(args.checkpoint / 'backup'))
+    env['INFLUX_ORG'] = 'home'
     buckets = json.loads(cli('bucket', 'list', '--org', 'home', '--json'))
     selected = sorted([dict(id=b['id'], name=b['name'], orgID=b['orgID'], retentionRules=b['retentionRules'])
                        for b in buckets], key=lambda b: b['id'])
