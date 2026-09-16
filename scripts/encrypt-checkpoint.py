@@ -12,6 +12,14 @@ spec = importlib.util.spec_from_file_location('recovery', Path(__file__).with_na
 r = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(r)
 
+# (path under the repository root, label inside /checkpoint/credentials, required)
+# secrets/influx-restic-password must never be listed: it is the key for this repository.
+CREDENTIALS = [('.env', 'iot.env', True),
+               ('mosquitto/password.txt', 'mosquitto-password.txt', True),
+               ('secrets/influx-operator-token', 'influx-operator-token', True),
+               ('secrets/threadripper-infra-token.json', 'threadripper-infra-token.json', False),
+               ('secrets/grafana-infra-token.json', 'grafana-infra-token.json', False)]
+
 
 def main():
     p = argparse.ArgumentParser()
@@ -33,10 +41,15 @@ def main():
         r.command(['docker', 'cp', str(args.source), name + ':/checkpoint'])
         r.command(['docker', 'cp', str(key), name + ':/password'])
         r.command(['docker', 'exec', name, 'mkdir', '/checkpoint/credentials'])
-        for file, label in [(r.ROOT / '.env', 'iot.env'),
-                            (r.ROOT / 'mosquitto/password.txt', 'mosquitto-password.txt'),
-                            (r.ROOT / 'secrets/influx-operator-token', 'influx-operator-token')]:
+        included, skipped = [], []
+        for relative, label, required in CREDENTIALS:
+            file = r.ROOT / relative
+            if not file.is_file():
+                if required: raise FileNotFoundError('Required credential file missing: ' + label)
+                skipped.append(label)
+                continue
             r.command(['docker', 'cp', str(file), name + ':/checkpoint/credentials/' + label])
+            included.append(label)
         r.command(['docker', 'exec', name, 'sh', '-c',
             'export RESTIC_REPOSITORY=/repository RESTIC_PASSWORD_FILE=/password; '
             'restic init && restic backup /checkpoint && restic check --read-data && '
@@ -45,7 +58,8 @@ def main():
                                   '--password-file', '/password', 'snapshots', '--json']))
         r.command(['docker', 'cp', name + ':/repository', str(args.destination / 'repository')])
         verification = dict(snapshot=snapshots[-1]['id'], all_data_checked=True,
-                            restored_files_identical=True, database_drill='source/verification.json')
+                            restored_files_identical=True, database_drill='source/verification.json',
+                            credentials_included=included, credentials_skipped=skipped)
         (args.destination / 'encryption-verification.json').write_bytes((json.dumps(verification, indent=2)+'\n').encode())
         print(json.dumps(verification))
     finally:

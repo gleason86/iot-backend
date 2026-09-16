@@ -16,5 +16,5 @@ ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/srv/continuity-monitor
 IPAddressDeny=any
-IPAddressAllow=192.168.1.100
+IPAddressAllow={{ monitor_endpoint_hosts | default(['10.77.77.1', '192.168.1.100']) | join(' ') }}
 LogNamespace=continuity-monitor

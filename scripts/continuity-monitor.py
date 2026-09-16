@@ -12,6 +12,27 @@ THRESHOLDS = {'iot:W': 900, 'network:cable_modem': 1020, 'network:wifi_ap': 1020
               'network:starlink_dish': 300, 'network:orbi_unit': 300,
               'network:router_wan': 300, 'network:router_port': 300, 'network:router_system': 300}
 
+# Fixed, reviewed endpoint allowlist (not user-extensible from config.json); a
+# typo or drift in the deployed config cannot point this read-only monitor at
+# an unreviewed host. 'url' is still a configuration value, just one that must
+# be one of these two. Keep this tuple and roles/monitor/defaults/main.yml's
+# monitor_endpoint_hosts in sync if the accepted network paths ever change.
+ALLOWED_URLS = (
+    'http://10.77.77.1:8086',    # direct cable path; confirmed reachable (200) from Threadripper, default deployment target
+    'http://192.168.1.100:8086',  # legacy Wi-Fi path; unreachable (timeout) from Threadripper as of 2026-09-15/16, kept for rollback
+)
+
+# This monitor checks only InfluxDB producer/backend freshness (the iot and
+# network buckets queried below). It has no MQTT-checking code and does not
+# probe 192.168.1.100:1883; that host/port appears only in unrelated manual
+# findings elsewhere. If an MQTT check is ever added here, its broker host
+# must be its own configuration value validated the same way (an explicit
+# allowlist), and its failure reason must say plainly that MQTT is expected
+# only on the Wi-Fi/household-LAN path and is not expected to be reachable
+# over the direct cable unless the broker is deliberately exposed there --
+# that exposure decision belongs to Networking/broker configuration, not to
+# this read-only monitor.
+
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
@@ -52,14 +73,19 @@ def query(config, bucket):
     return values
 
 
+def validate_url(url):
+    # This is not a general HTTP credential forwarder: the configured URL must
+    # be one of the fixed, reviewed addresses in ALLOWED_URLS.
+    if url not in ALLOWED_URLS: raise ValueError('Unreviewed endpoint: ' + repr(url))
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--config', type=Path, required=True)
     p.add_argument('--state', type=Path, required=True)
     args = p.parse_args()
     config = json.loads(args.config.read_bytes())
-    # Fixed intended LAN endpoint; this is not a general HTTP credential forwarder.
-    if config['url'] != 'http://192.168.1.100:8086': raise ValueError('Unreviewed endpoint')
+    validate_url(config['url'])
     now = datetime.now(timezone.utc)
     previous = json.loads(args.state.read_bytes()) if args.state.exists() else {}
     try:
