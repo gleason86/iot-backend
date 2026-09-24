@@ -1,0 +1,19 @@
+# Template for C:\ProgramData\telegraf\telegraf.d\influxdb-output.conf, the ONLY
+# file that carries the telegraf-ryzen Influx token. install-telegraf.ps1 -Mode Apply
+# creates the file empty, strips inheritance and grants SYSTEM / Administrators (F)
+# and NT SERVICE\telegraf (R) FIRST, then writes this content with the real token
+# from iot-backend\secrets\household-telegraf-ryzen-token.json. Never commit the
+# real file; never print it.
+#
+# Why a whole stanza and not "token only": Telegraf treats every
+# [[outputs.influxdb_v2]] table as a separate plugin instance, so a fragment with
+# only `token` would add a second output that has no urls and the main config
+# would still need the token. Keeping the entire output here (and none in
+# telegraf.conf) keeps telegraf.conf secret-free and identical to git.
+[[outputs.influxdb_v2]]
+  urls = ["http://localhost:8086"]
+  token = "REPLACED-BY-install-telegraf.ps1"
+  organization = "home"
+  bucket = "infra"
+  timeout = "5s"
+  content_encoding = "gzip"

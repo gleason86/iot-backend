@@ -1,0 +1,1362 @@
+// Grafana Alloy v1.19.2 collector configuration for the Ryzen (Windows 11).
+// Household observability M3 pilot, log-collector worker, 2026-09-16.
+//
+// Binding references: grafana/pilot/CONTRACT.md (labels, structured metadata,
+// event_id, gateway URL/auth/TLS, secrets paths); architecture-2026-09-16.md
+// A section 3.2 (router syslog exception), 3.3 (sources, xpath ids, labels,
+// event identity), 3.5 (loss markers), 3.8 (SSH/RDP fields, sanitizer semantics).
+//
+// Runs as the Windows service "Alloy" under the virtual account NT SERVICE\Alloy
+// (Event Log Readers + read ACL on pfirewall.log; see install-alloy.ps1,
+// pfirewall-acl.ps1). That is the approved least-privilege identity; the
+// LocalSystem fallback (install-alloy.ps1 -RuntimeAccount LocalSystem) is
+// conditional on a real log rotation demonstrably removing the virtual
+// account's read access (pfirewall-acl.ps1 -Mode Verify; Codex C3), and is not
+// assumed by this configuration. Installed config path:
+//   C:\ProgramData\GrafanaLabs\Alloy\config.alloy
+// Storage path (positions, bookmarks): C:\ProgramData\GrafanaLabs\Alloy\data
+// Secrets (never in git):             C:\ProgramData\GrafanaLabs\Alloy\secrets\
+//
+// Labels leaving this host are exactly: host, source, action, direction, proto,
+// class. Every other field is structured metadata. Routing helpers used inside
+// pipelines (program, winfw_flag, ...) are dropped before loki.write.
+//
+// Deviations from CONTRACT.md, reported in the evidence file:
+//  1. Windows channel event_id is "ryzen:<source>:<record_id>" WITHOUT the
+//     generation component. The generation counter (incremented by Security 1102
+//     / System 104 log-clear rows) is stateful and cannot be computed inside
+//     Alloy; record_id and channel are attached as separate metadata and the
+//     aggregator derives the generation from the 1102/104 rows in the same
+//     stream. RecordId restarts after a clear, so equal event_id values on
+//     either side of a 1102/104 row are distinct events.
+//  2. pfirewall event_id is sha256("ryzen:winfw:-:<event_ts>:<normalized line>")
+//     with the file-generation component fixed to "-": it is not computable
+//     statelessly, and a non-constant value would break de-duplication of the
+//     lines that reappear under pfirewall.log.old after rotation.
+//  3. Alloy v1.19.2 renders the Windows record id as JSON field "eventRecordID"
+//     (internal/component/loki/source/windowsevent/format.go), not "RecordId".
+//  4. Extra structured metadata beyond the contract list: logon_id (Windows
+//     TargetLogonId/LogonID, needed for the A 3.8 RDP correlation).
+//  5. Router entries use the Alloy receive time as the entry timestamp
+//     (inferred=ts); the router's own rfc3164 timestamp has no year and is wrong
+//     before NTP sync at boot, which Loki would reject (> 168h) instead of retry.
+
+// ---------------------------------------------------------------------------
+// Alloy self-log (source=alloy): warnings and errors only, so dropped-batch and
+// retry exhaustion messages are visible in Loki as loss markers (A 3.5).
+// ---------------------------------------------------------------------------
+logging {
+	level    = "warn"
+	format   = "logfmt"
+	write_to = [loki.process.alloy_self.receiver]
+}
+
+loki.process "alloy_self" {
+	forward_to = [loki.write.gateway.receiver]
+
+	stage.static_labels {
+		values = {
+			source    = "alloy",
+			action    = "other",
+			direction = "-",
+		}
+	}
+
+	stage.template {
+		source   = "observer"
+		template = "ryzen"
+	}
+
+	stage.structured_metadata {
+		values = {
+			observer = "",
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Windows Firewall packet log (source=winfw): pfirewall.log and its rotated copy.
+// W3C fields: date time action protocol src-ip dst-ip src-port dst-port size
+// tcpflags tcpsyn tcpack tcpwin icmptype icmpcode info path [pid]
+// Timestamps are local time (America/Los_Angeles). Both files are read; lines
+// that reappear in pfirewall.log.old after rotation hash to the same event_id
+// and are de-duplicated by the aggregator (stored_entries vs distinct_events).
+// ---------------------------------------------------------------------------
+// Integrator decision (evidence/m3/log-collectors-2026-09-16.md section 8): the live
+// `.log` tailer survives rotation on its own (FILE_SHARE_DELETE + drain/reopen), and
+// with Loki's `max_chunk_age: 2h` almost every `.old` line is answered `400 entry too
+// far behind` while Alloy counts the whole batch as dropped, which the aggregator would
+// read as loss every rotation. `.old` is therefore a RECOVERY-ONLY source: uncomment it
+// only for an attended replay after an outage, then comment it out again. Rotation
+// while Alloy is down is covered by the coverage rules (collector-absent + restart
+// window), not by re-reading `.old` (acceptance F3b re-scoped accordingly).
+local.file_match "winfw" {
+	path_targets = [
+		{__path__ = "C:/Windows/System32/LogFiles/Firewall/pfirewall.log"},
+		// {__path__ = "C:/Windows/System32/LogFiles/Firewall/pfirewall.log.old"},
+	]
+	sync_period = "10s"
+}
+
+loki.source.file "winfw" {
+	targets    = local.file_match.winfw.targets
+	forward_to = [loki.process.winfw.receiver]
+
+	file_watch {
+		min_poll_frequency = "1s"
+		max_poll_frequency = "5s"
+	}
+}
+
+loki.process "winfw" {
+	forward_to = [loki.write.gateway.receiver]
+
+	// Header (#Version, #Software, #Time, #Fields) and blank lines.
+	stage.drop {
+		expression          = `^(#|\s*$)`
+		drop_counter_reason = "winfw_header"
+	}
+
+	// Loss marker: the count is the first numeric field after INFO-EVENTS-LOST.
+	stage.regex {
+		expression = `^(?P<date>\d{4}-\d{2}-\d{2}) (?P<time>\d{2}:\d{2}:\d{2}) (?P<lost>INFO-EVENTS-LOST)\b[^0-9]*(?P<count>\d+)`
+	}
+
+	// Packet line. The trailing pid column exists on current builds; tolerated.
+	stage.regex {
+		expression = `^(?P<date>\d{4}-\d{2}-\d{2}) (?P<time>\d{2}:\d{2}:\d{2}) (?P<fw_action>DROP|ALLOW) (?P<fw_proto>\S+) (?P<src_ip>\S+) (?P<dst_ip>\S+) (?P<src_port>\S+) (?P<dst_port>\S+) (?P<size>\S+) (?P<tcpflags>\S+) (?P<tcpsyn>\S+) (?P<tcpack>\S+) (?P<tcpwin>\S+) (?P<icmptype>\S+) (?P<icmpcode>\S+) (?P<info>\S+) (?P<path>\S+)(?: (?P<pid>\S+))?\s*$`
+	}
+
+	// Event time: local wall clock, parsed in America/Los_Angeles. On failure
+	// (unparsed line) the ingest time is kept ("fudge") and flagged inferred=ts.
+	stage.template {
+		source   = "event_ts"
+		template = `{{ default "" .date }} {{ default "" .time }}`
+	}
+
+	stage.timestamp {
+		source            = "event_ts"
+		format            = "2006-01-02 15:04:05"
+		location          = "America/Los_Angeles"
+		action_on_failure = "fudge"
+	}
+
+	stage.template {
+		source   = "action"
+		template = `{{- $a := default "" .fw_action -}}
+{{- if .lost -}}lost
+{{- else if eq $a "DROP" -}}drop
+{{- else if eq $a "ALLOW" -}}allow
+{{- else -}}other{{- end -}}`
+	}
+
+	stage.template {
+		source   = "direction"
+		template = `{{- $p := default "" .path -}}
+{{- if eq $p "SEND" -}}out
+{{- else if eq $p "RECEIVE" -}}in
+{{- else -}}-{{- end -}}`
+	}
+
+	stage.template {
+		source   = "proto"
+		template = `{{- $p := lower (default "" .fw_proto) -}}
+{{- if eq $p "tcp" -}}tcp
+{{- else if eq $p "udp" -}}udp
+{{- else if eq $p "icmp" -}}icmp
+{{- else if eq $p "icmpv6" -}}icmpv6
+{{- else -}}other{{- end -}}`
+	}
+
+	// Destination class (CONTRACT label "class", firewall streams only).
+	stage.template {
+		source   = "class"
+		template = `{{- $ip := lower (default "" .dst_ip) -}}
+{{- $port := default "" .dst_port -}}
+{{- $proto := default "" .proto -}}
+{{- if and (or (eq $ip "224.0.0.251") (eq $ip "ff02::fb")) (eq $port "5353") -}}mdns
+{{- else if and (eq $ip "239.255.255.250") (eq $port "1900") -}}ssdp
+{{- else if and (or (eq $ip "224.0.0.252") (eq $ip "ff02::1:3")) (eq $port "5355") -}}llmnr
+{{- else if and (eq $proto "udp") (eq $port "137") -}}nbns
+{{- else if regexMatch "^(22[4-9]|23[0-9])\\." $ip -}}multicast
+{{- else if regexMatch "^ff[0-9a-f][0-9a-f]:" $ip -}}multicast
+{{- else if eq $ip "255.255.255.255" -}}broadcast
+{{- else if regexMatch "^\\d+\\.\\d+\\.\\d+\\.255$" $ip -}}broadcast
+{{- else -}}unicast{{- end -}}`
+	}
+
+	// Normalized line: CR stripped, whitespace collapsed. Identity per CONTRACT:
+	// sha256(host:winfw:<file-generation>:<event_ts>:<normalized line>) with the
+	// file-generation fixed to "-" (deviation 2 in the header).
+	stage.template {
+		source   = "normalized"
+		template = `{{ regexReplaceAll "\\s+" (trimAll "\r" .Entry) " " | trim }}`
+	}
+
+	stage.template {
+		source   = "event_id"
+		template = `{{ printf "ryzen:winfw:-:%s:%s" (default "" .event_ts) (default "" .normalized) | sha256sum }}`
+	}
+
+	stage.template {
+		source   = "identity_quality"
+		template = "uncertain"
+	}
+
+	stage.template {
+		source   = "observer"
+		template = "ryzen"
+	}
+
+	stage.template {
+		source   = "fw"
+		template = "winfw"
+	}
+
+	// DST fall-back hour flag: any 01:xx local line in the first week of
+	// November is marked inferred=ts (a superset of the ambiguous hour).
+	stage.template {
+		source   = "winfw_flag"
+		template = `{{- $d := default "" .date -}}{{- $t := default "" .time -}}
+{{- if and .fw_action .date -}}
+{{- if and (regexMatch "-11-0[1-7]$" $d) (regexMatch "^01:" $t) -}}dst{{- else -}}ok{{- end -}}
+{{- else if .lost -}}lost
+{{- else -}}parse_error{{- end -}}`
+	}
+
+	stage.labels {
+		values = {
+			action     = "",
+			direction  = "",
+			winfw_flag = "",
+		}
+	}
+
+	stage.static_labels {
+		values = {
+			source = "winfw",
+		}
+	}
+
+	stage.structured_metadata {
+		values = {
+			event_ts         = "",
+			observer         = "",
+			fw               = "",
+			event_id         = "",
+			identity_quality = "",
+		}
+	}
+
+	// Packet rows: proto/class labels and the five-tuple metadata.
+	stage.match {
+		selector = `{source="winfw", action=~"drop|allow"}`
+
+		stage.labels {
+			values = {
+				proto = "",
+				class = "",
+			}
+		}
+
+		stage.structured_metadata {
+			values = {
+				src_ip   = "",
+				src_port = "",
+				dst_ip   = "",
+				dst_port = "",
+			}
+		}
+	}
+
+	stage.match {
+		selector = `{source="winfw", winfw_flag="dst"}`
+
+		stage.template {
+			source   = "inferred"
+			template = "ts"
+		}
+
+		stage.structured_metadata {
+			values = {
+				inferred = "",
+			}
+		}
+	}
+
+	// INFO-EVENTS-LOST: action=lost with the reported count (A 3.5 loss marker).
+	stage.match {
+		selector = `{source="winfw", winfw_flag="lost"}`
+
+		stage.structured_metadata {
+			values = {
+				count = "",
+			}
+		}
+	}
+
+	// Unparsed rows are kept (action=other, parse_error=true, ingest timestamp).
+	stage.match {
+		selector = `{source="winfw", winfw_flag="parse_error"}`
+
+		stage.template {
+			source   = "parse_error"
+			template = "true"
+		}
+
+		stage.template {
+			source   = "inferred"
+			template = "ts"
+		}
+
+		stage.structured_metadata {
+			values = {
+				parse_error = "",
+				inferred    = "",
+			}
+		}
+	}
+
+	stage.label_drop {
+		values = ["filename", "winfw_flag"]
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Windows event channels (A 3.3). One source per channel with the xpath filter;
+// one shared sanitizing pipeline. Raw messages are never forwarded
+// (exclude_event_message = true); EventData/UserData XML is parsed for the
+// listed fields only and the stored line is rebuilt from those fields.
+// Bookmarks live under the service storage path.
+// ---------------------------------------------------------------------------
+loki.source.windowsevent "winsec" {
+	eventlog_name          = "Security"
+	xpath_query            = "*[System[(EventID=4624 or EventID=4625 or EventID=4634 or EventID=4647 or EventID=4778 or EventID=4779 or EventID=4800 or EventID=4801 or EventID=1102)]]"
+	bookmark_path          = "C:\\ProgramData\\GrafanaLabs\\Alloy\\data\\bookmarks\\security.xml"
+	use_incoming_timestamp = true
+	exclude_event_message  = true
+	exclude_user_data      = false // 1102 carries SubjectUserName in UserData/LogFileCleared
+	exclude_event_data     = false
+	poll_interval          = "3s"
+	labels                 = {source = "winsec"}
+	forward_to             = [loki.process.winevt.receiver]
+}
+
+loki.source.windowsevent "winlsm" {
+	eventlog_name          = "Microsoft-Windows-TerminalServices-LocalSessionManager/Operational"
+	xpath_query            = "*[System[(EventID=21 or EventID=22 or EventID=23 or EventID=24 or EventID=25 or EventID=39 or EventID=40 or EventID=41 or EventID=42)]]"
+	bookmark_path          = "C:\\ProgramData\\GrafanaLabs\\Alloy\\data\\bookmarks\\lsm.xml"
+	use_incoming_timestamp = true
+	exclude_event_message  = true
+	exclude_user_data      = false
+	exclude_event_data     = false
+	poll_interval          = "3s"
+	labels                 = {source = "winlsm"}
+	forward_to             = [loki.process.winevt.receiver]
+}
+
+loki.source.windowsevent "winrcm" {
+	eventlog_name          = "Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational"
+	xpath_query            = "*[System[(EventID=261 or EventID=1149)]]"
+	bookmark_path          = "C:\\ProgramData\\GrafanaLabs\\Alloy\\data\\bookmarks\\rcm.xml"
+	use_incoming_timestamp = true
+	exclude_event_message  = true
+	exclude_user_data      = false
+	exclude_event_data     = false
+	poll_interval          = "3s"
+	labels                 = {source = "winrcm"}
+	forward_to             = [loki.process.winevt.receiver]
+}
+
+loki.source.windowsevent "winrdpcore" {
+	eventlog_name          = "Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational"
+	xpath_query            = "*[System[(EventID=131 or EventID=140)]]"
+	bookmark_path          = "C:\\ProgramData\\GrafanaLabs\\Alloy\\data\\bookmarks\\rdpcore.xml"
+	use_incoming_timestamp = true
+	exclude_event_message  = true
+	exclude_user_data      = true
+	exclude_event_data     = false
+	poll_interval          = "3s"
+	labels                 = {source = "winrdpcore"}
+	forward_to             = [loki.process.winevt.receiver]
+}
+
+loki.source.windowsevent "winfwpolicy" {
+	eventlog_name = "Microsoft-Windows-Windows Firewall With Advanced Security/Firewall"
+	// J6 (live-baselines-2026-09-17 §2.6): on build 26200 rule add/modify/delete fire as
+	// 2097 / 2099 / 2052 (2004/2005/2006 = 0 events in 27 days); the legacy ids stay in the
+	// filter for other builds, 2099 and 2052 are added so modifications and deletions ship.
+	xpath_query            = "*[System[(EventID=2004 or EventID=2005 or EventID=2006 or EventID=2010 or EventID=2082 or EventID=2097 or EventID=2099 or EventID=2052)]]"
+	bookmark_path          = "C:\\ProgramData\\GrafanaLabs\\Alloy\\data\\bookmarks\\fwpolicy.xml"
+	use_incoming_timestamp = true
+	exclude_event_message  = true
+	exclude_user_data      = true
+	exclude_event_data     = false
+	poll_interval          = "3s"
+	labels                 = {source = "winfwpolicy"}
+	forward_to             = [loki.process.winevt.receiver]
+}
+
+// System 104 (Eventlog provider, "log file was cleared") names the cleared
+// channel in EventData; it drives the generation counter of the non-Security
+// channels in the aggregator.
+loki.source.windowsevent "winsys" {
+	eventlog_name          = "System"
+	xpath_query            = "*[System[Provider[@Name='Microsoft-Windows-Eventlog'] and (EventID=104)]]"
+	bookmark_path          = "C:\\ProgramData\\GrafanaLabs\\Alloy\\data\\bookmarks\\system.xml"
+	use_incoming_timestamp = true
+	exclude_event_message  = true
+	exclude_user_data      = false
+	exclude_event_data     = false
+	poll_interval          = "3s"
+	labels                 = {source = "winsys"}
+	forward_to             = [loki.process.winevt.receiver]
+}
+
+loki.process "winevt" {
+	forward_to = [loki.write.gateway.receiver]
+
+	// Rendered line (format.go): source, channel, computer, event_id, version,
+	// level, task, opCode, levelText, taskText, opCodeText, keywords,
+	// timeCreated, eventRecordID, correlation{}, execution{}, security{},
+	// user_data, event_data, message.
+	stage.json {
+		drop_malformed = true
+		expressions    = {
+			channel      = "channel",
+			event_num    = "event_id",
+			record_id    = "eventRecordID",
+			time_created = "timeCreated",
+			event_data   = "event_data",
+			user_data    = "user_data",
+		}
+	}
+
+	// A record without eventRecordID has no identity; drop it and count it.
+	stage.template {
+		source   = "winevt_ok"
+		template = `{{ if .record_id }}ok{{ else }}unparsed{{ end }}`
+	}
+
+	stage.drop {
+		source              = "winevt_ok"
+		value               = "unparsed"
+		drop_counter_reason = "winevt_unparsed"
+	}
+
+	// EventData <Data Name='...'> values (Windows renders single-quoted
+	// attributes; double quotes tolerated). Later regexes overwrite earlier
+	// ones, so the preferred field for a key is listed last.
+	stage.regex {
+		source     = "event_data"
+		expression = `<Data Name=['"]SubjectUserName['"]>(?P<user_raw>[^<]*)</Data>`
+	}
+
+	stage.regex {
+		source     = "event_data"
+		expression = `<Data Name=['"]AccountName['"]>(?P<user_raw>[^<]*)</Data>`
+	}
+
+	stage.regex {
+		source     = "event_data"
+		expression = `<Data Name=['"]TargetUserName['"]>(?P<user_raw>[^<]*)</Data>`
+	}
+
+	stage.regex {
+		source     = "event_data"
+		expression = `<Data Name=['"]SubjectLogonId['"]>(?P<logon_id>[^<]*)</Data>`
+	}
+
+	stage.regex {
+		source     = "event_data"
+		expression = `<Data Name=['"]LogonID['"]>(?P<logon_id>[^<]*)</Data>`
+	}
+
+	stage.regex {
+		source     = "event_data"
+		expression = `<Data Name=['"]TargetLogonId['"]>(?P<logon_id>[^<]*)</Data>`
+	}
+
+	stage.regex {
+		source     = "event_data"
+		expression = `<Data Name=['"]LogonType['"]>(?P<logon_type>[^<]*)</Data>`
+	}
+
+	stage.regex {
+		source     = "event_data"
+		expression = `<Data Name=['"](?:IpAddress|ClientAddress|IPString)['"]>(?P<src_ip>[^<]*)</Data>`
+	}
+
+	stage.regex {
+		source     = "event_data"
+		expression = `<Data Name=['"]IpPort['"]>(?P<src_port>[^<]*)</Data>`
+	}
+
+	// RdpCoreTS 131: ClientIP carries "ip:port" (IPv4) or "[v6]:port".
+	stage.regex {
+		source     = "event_data"
+		expression = `<Data Name=['"]ClientIP['"]>\[?(?P<src_ip>[^<\]]*?)\]?:(?P<src_port>\d+)</Data>`
+	}
+
+	stage.regex {
+		source     = "event_data"
+		expression = `<Data Name=['"]SessionId['"]>(?P<session_id>[^<]*)</Data>`
+	}
+
+	stage.regex {
+		source     = "event_data"
+		expression = `<Data Name=['"]SubStatus['"]>(?P<reason>[^<]*)</Data>`
+	}
+
+	stage.regex {
+		source     = "event_data"
+		expression = `<Data Name=['"]RuleId['"]>(?P<rule_id>[^<]*)</Data>`
+	}
+
+	stage.regex {
+		source     = "event_data"
+		expression = `<Data Name=['"]RuleName['"]>(?P<rule_name>[^<]*)</Data>`
+	}
+
+	stage.regex {
+		source     = "event_data"
+		expression = `<Data Name=['"]Profiles['"]>(?P<profiles>[^<]*)</Data>`
+	}
+
+	stage.regex {
+		source     = "event_data"
+		expression = `<Data Name=['"]OldProfile['"]>(?P<old_profile>[^<]*)</Data>.*<Data Name=['"]NewProfile['"]>(?P<new_profile>[^<]*)</Data>`
+	}
+
+	stage.regex {
+		source     = "event_data"
+		expression = `<Data Name=['"]SettingType['"]>(?P<setting_type>[^<]*)</Data>`
+	}
+
+	stage.regex {
+		source     = "event_data"
+		expression = `<Data Name=['"]ModifyingUser['"]>(?P<modifying_user>[^<]*)</Data>`
+	}
+
+	// Log-clear events (Security 1102, System 104): the shape on build 26200 is
+	// UNVERIFIED (no clear exists in the available window; the provider manifest
+	// declares 104/1102 v0 as EventData fields SubjectUserName/SubjectDomainName/
+	// Channel/BackupPath, while older builds render <UserData><LogFileCleared> bare
+	// elements) — live-baselines-2026-09-17 §2.6 item 5. Both shapes are accepted:
+	// UserData bare elements first, then EventData <Data Name="..."> from event_data.
+	// The <Channel> element inside user_data is never the envelope <System><Channel>.
+	// Verified at the first real clear (attended; never induced by this pilot).
+	stage.regex {
+		source     = "user_data"
+		expression = `<SubjectUserName>(?P<user_raw>[^<]*)</SubjectUserName>`
+	}
+
+	stage.regex {
+		source     = "user_data"
+		expression = `<Channel>(?P<cleared_channel>[^<]*)</Channel>`
+	}
+
+	stage.regex {
+		source     = "event_data"
+		expression = `<Data Name=['"]Channel['"]>(?P<cleared_channel>[^<]*)</Data>`
+	}
+
+	// UserData (TerminalServices LSM/RCM): <EventXML><User>DOMAIN\name</User>
+	// <SessionID>n</SessionID><Address>ip</Address>, LSM 39/40 session/reason,
+	// RCM 1149 Param1 (user) Param2 (domain) Param3 (address).
+	stage.regex {
+		source     = "user_data"
+		expression = `<User>(?P<user_raw>[^<]*)</User>`
+	}
+
+	stage.regex {
+		source     = "user_data"
+		expression = `<(?:SessionID|Session|TargetSession)>(?P<session_id>[^<]*)</(?:SessionID|Session|TargetSession)>`
+	}
+
+	stage.regex {
+		source     = "user_data"
+		expression = `<Address>(?P<src_ip>[^<]*)</Address>`
+	}
+
+	stage.regex {
+		source     = "user_data"
+		expression = `<Reason>(?P<reason>[^<]*)</Reason>`
+	}
+
+	stage.regex {
+		source     = "user_data"
+		expression = `<Param1>(?P<user_raw>[^<]*)</Param1>`
+	}
+
+	stage.regex {
+		source     = "user_data"
+		expression = `<Param3>(?P<src_ip>[^<]*)</Param3>`
+	}
+
+	stage.regex {
+		source     = "user_data"
+		expression = `<listenerName>(?P<listener>[^<]*)</listenerName>`
+	}
+
+	// Account name only: strip "DOMAIN\" (LSM) and keep the rest as logged.
+	stage.template {
+		source   = "user"
+		template = `{{ regexReplaceAll "^.*\\\\" (default "" .user_raw) "" }}`
+	}
+
+	// action per event id (CONTRACT vocabulary). Unknown ids are "other".
+	stage.template {
+		source   = "action"
+		template = `{{- $e := default "" .event_num -}}
+{{- if eq $e "4624" -}}accept
+{{- else if eq $e "4625" -}}fail
+{{- else if or (eq $e "4634") (eq $e "4647") -}}close
+{{- else if eq $e "4778" -}}reconnect
+{{- else if eq $e "4779" -}}disconnect
+{{- else if or (eq $e "4800") (eq $e "4801") -}}other
+{{- else if or (eq $e "1102") (eq $e "104") -}}cleared
+{{- else if or (eq $e "21") (eq $e "22") -}}open
+{{- else if eq $e "23" -}}close
+{{- else if or (eq $e "24") (eq $e "39") (eq $e "40") -}}disconnect
+{{- else if eq $e "25" -}}reconnect
+{{- else if or (eq $e "41") (eq $e "42") -}}other
+{{- else if eq $e "1149" -}}accept
+{{- else if or (eq $e "261") (eq $e "131") -}}open
+{{- else if eq $e "140" -}}fail
+{{- else if or (eq $e "2004") (eq $e "2005") (eq $e "2006") (eq $e "2010") (eq $e "2082") (eq $e "2097") (eq $e "2099") (eq $e "2052") -}}policy
+{{- else -}}other{{- end -}}`
+	}
+
+	// Human-readable reason for the ids whose EventData has none.
+	stage.template {
+		source   = "reason"
+		template = `{{- $e := default "" .event_num -}}{{- $r := default "" .reason -}}
+{{- if $r -}}{{ $r }}
+{{- else if eq $e "4800" -}}locked
+{{- else if eq $e "4801" -}}unlocked
+{{- else if eq $e "2004" -}}rule-added
+{{- else if eq $e "2005" -}}rule-modified
+{{- else if eq $e "2006" -}}rule-deleted
+{{- else if eq $e "2010" -}}profile-changed:{{ default "" .old_profile }}>{{ default "" .new_profile }}
+{{- else if eq $e "2082" -}}setting-changed:{{ default "" .setting_type }}
+{{- else if eq $e "2097" -}}rule-added
+{{- else if eq $e "2099" -}}rule-modified
+{{- else if eq $e "2052" -}}rule-deleted
+{{- else if eq $e "104" -}}cleared:{{ default "" .cleared_channel }}
+{{- else if eq $e "261" -}}listener:{{ default "" .listener }}
+{{- else -}}{{- end -}}`
+	}
+
+	// Identity (deviation 1): record_id and channel are attached separately;
+	// the aggregator prepends the generation derived from 1102/104 rows.
+	stage.template {
+		source   = "event_id"
+		template = `{{ printf "ryzen:%s:%s" (default "" .channel) (default "" .record_id) }}`
+	}
+
+	stage.template {
+		source   = "identity_quality"
+		template = "exact"
+	}
+
+	stage.template {
+		source   = "observer"
+		template = "ryzen"
+	}
+
+	stage.template {
+		source   = "event_ts"
+		template = `{{ default "" .time_created }}`
+	}
+
+	stage.template {
+		source   = "direction"
+		template = "-"
+	}
+
+	// The sanitized stored line: only the extracted fields (empty ones omitted),
+	// never the XML.
+	stage.template {
+		source   = "line"
+		template = `{{- $d := dict "channel" (default "" .channel) "event" (default "" .event_num) "record_id" (default "" .record_id) "action" (default "" .action) -}}
+{{- range $k, $v := dict "user" (default "" .user) "logon_type" (default "" .logon_type) "logon_id" (default "" .logon_id) "session_id" (default "" .session_id) "src_ip" (default "" .src_ip) "src_port" (default "" .src_port) "reason" (default "" .reason) "rule_id" (default "" .rule_id) "rule_name" (default "" .rule_name) "profiles" (default "" .profiles) "modifying_user" (default "" .modifying_user) -}}
+{{- if $v -}}{{- $_ := set $d $k $v -}}{{- end -}}
+{{- end -}}
+{{ $d | toJson }}`
+	}
+
+	stage.labels {
+		values = {
+			action    = "",
+			direction = "",
+		}
+	}
+
+	stage.structured_metadata {
+		values = {
+			event_ts         = "",
+			observer         = "",
+			channel          = "",
+			record_id        = "",
+			event_id         = "",
+			identity_quality = "",
+		}
+	}
+
+	// Optional fields: only attached when extracted (never as empty metadata).
+	stage.match {
+		selector = `{source="winsec"}`
+
+		stage.template {
+			source   = "service"
+			template = "logon"
+		}
+	}
+
+	stage.match {
+		selector = `{source=~"winlsm|winrcm|winrdpcore"}`
+
+		stage.template {
+			source   = "service"
+			template = "rdp"
+		}
+	}
+
+	stage.match {
+		selector = `{source=~"winsec|winlsm|winrcm|winrdpcore"}`
+
+		stage.structured_metadata {
+			values = {
+				service    = "",
+				user       = "",
+				logon_type = "",
+				logon_id   = "",
+				session_id = "",
+				src_ip     = "",
+				src_port   = "",
+				reason     = "",
+			}
+		}
+	}
+
+	stage.match {
+		selector = `{source="winfwpolicy"}`
+
+		stage.template {
+			source   = "fw"
+			template = "winfw"
+		}
+
+		stage.structured_metadata {
+			values = {
+				fw        = "",
+				rule_id   = "",
+				rule_name = "",
+				reason    = "",
+				user      = "",
+			}
+		}
+	}
+
+	stage.match {
+		selector = `{source="winsys"}`
+
+		stage.template {
+			source   = "service"
+			template = "eventlog"
+		}
+
+		stage.structured_metadata {
+			values = {
+				service = "",
+				reason  = "",
+				user    = "",
+			}
+		}
+	}
+
+	stage.output {
+		source = "line"
+	}
+
+	// Failsafe: if the rebuilt line is not in place, the raw record never ships.
+	stage.drop {
+		expression          = `"event_data"|"user_data"|<Data Name=|<EventXML`
+		drop_counter_reason = "winevt_sanitizer_failsafe"
+	}
+
+	// Defensive: only the contract labels leave this pipeline.
+	stage.label_drop {
+		values = ["filename", "winevt_ok"]
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Router syslog (A 3.2 exception): OpenWrt logd -> UDP 1514, rfc3164, no
+// authentication, lossy; identity_quality=none. Only the fw4 kernel log lines
+// (source=owrt-fw) and dropbear (source=dropbear) are kept; everything else is
+// dropped and counted. The entry timestamp is the receive time (deviation 5).
+// ---------------------------------------------------------------------------
+loki.relabel "router_syslog" {
+	forward_to = []
+
+	rule {
+		source_labels = ["__syslog_message_app_name"]
+		target_label  = "program"
+	}
+}
+
+loki.source.syslog "router" {
+	listener {
+		address                         = "192.168.1.100:1514"
+		protocol                        = "udp"
+		syslog_format                   = "rfc3164"
+		use_incoming_timestamp          = false
+		rfc3164_default_to_current_year = true
+		max_message_length              = 8192
+		labels                          = {host = "mx65w"}
+	}
+
+	relabel_rules = loki.relabel.router_syslog.rules
+	forward_to    = [loki.process.router.receiver]
+}
+
+loki.process "router" {
+	forward_to = [loki.write.gateway.receiver]
+
+	stage.template {
+		source   = "observer"
+		template = "ryzen"
+	}
+
+	stage.template {
+		source   = "identity_quality"
+		template = "none"
+	}
+
+	stage.template {
+		source   = "inferred"
+		template = "ts"
+	}
+
+	stage.template {
+		source   = "router_class"
+		template = "unmatched"
+	}
+
+	// fw4 nft "log prefix" lines via the kernel ring buffer. Zone defaults are
+	// expected as "<verdict> <zone> <in|forward|out>: "; per-rule logs carry the
+	// rule name as the prefix. The verdict word (reject/drop/accept) in the
+	// prefix decides "action"; a prefix without one yields action=other, so the
+	// D4 convention should put the verdict into custom per-rule prefixes
+	// (e.g. option log 'reject Block-Telnet: '). Confirmed by the Networking
+	// owner at D4; the exact prefix format is an open point in the evidence.
+	stage.match {
+		selector = `{program="kernel"}`
+
+		stage.regex {
+			expression = `^(?:\[\s*\d+\.\d+\]\s*)?(?:(?P<prefix>[^:]{1,80}):\s*)?IN=(?P<in_if>\S*)\s+OUT=(?P<out_if>\S*)\s.*?\bSRC=(?P<src_ip>\S+)\s+DST=(?P<dst_ip>\S+)\s.*?\bPROTO=(?P<fw_proto>\S+)(?:\s.*?\bSPT=(?P<src_port>\d+)\s+DPT=(?P<dst_port>\d+))?`
+		}
+
+		stage.template {
+			source   = "router_class"
+			template = `{{ if .src_ip }}fw{{ else }}unmatched{{ end }}`
+		}
+	}
+
+	stage.match {
+		selector = `{program="dropbear"}`
+
+		stage.regex {
+			expression = `^(?P<db_child>Child connection) from (?P<src_ip>[^:\s]+|\[[^\]]+\]):(?P<src_port>\d+)`
+		}
+
+		stage.regex {
+			expression = `^(?P<db_method>Password|Pubkey) auth succeeded for '(?P<user>[^']*)'(?: with (?P<keytype>\S+) key SHA256:(?P<fingerprint>\S+))? from (?P<src_ip>[^:\s]+|\[[^\]]+\]):(?P<src_port>\d+)`
+		}
+
+		stage.regex {
+			expression = `^(?P<db_fail>Bad password attempt|Bad PAM password attempt|Login attempt for nonexistent user|Pubkey auth bad|Public key auth failed)(?: for '(?P<user>[^']*)')? from (?P<src_ip>[^:\s]+|\[[^\]]+\]):(?P<src_port>\d+)`
+		}
+
+		stage.regex {
+			expression = `^(?P<db_exit>Exit)(?: \((?P<user>[^)]*)\))?(?: before auth)?(?: \(user '(?P<user2>[^']*)', \d+ fails\))? from <(?P<src_ip>[^>:]+|\[[^\]]+\]):(?P<src_port>\d+)>: (?P<reason>Disconnect received|Exited normally|Timeout before auth|Error reading|Error writing|Exited|Connection reset|Ended)`
+		}
+
+		stage.template {
+			source   = "router_class"
+			template = `{{ if or .db_child .db_method .db_fail .db_exit }}dropbear{{ else }}unmatched{{ end }}`
+		}
+	}
+
+	stage.labels {
+		values = {
+			router_class = "",
+		}
+	}
+
+	stage.metrics {
+		metric.counter {
+			name              = "router_syslog_lines_dropped_not_allowlisted_total"
+			description       = "Router syslog lines dropped because no allowlisted pattern matched"
+			source            = "router_class"
+			value             = "unmatched"
+			action            = "inc"
+			max_idle_duration = "24h"
+		}
+	}
+
+	stage.drop {
+		source              = "router_class"
+		value               = "unmatched"
+		drop_counter_reason = "router_not_allowlisted"
+	}
+
+	stage.match {
+		selector = `{router_class="fw"}`
+
+		stage.template {
+			source   = "action"
+			template = `{{- $p := lower (default "" .prefix) -}}
+{{- if regexMatch "reject" $p -}}reject
+{{- else if regexMatch "drop" $p -}}drop
+{{- else if regexMatch "accept" $p -}}allow
+{{- else -}}other{{- end -}}`
+		}
+
+		stage.template {
+			source   = "direction"
+			template = `{{- $i := default "" .in_if -}}{{- $o := default "" .out_if -}}
+{{- if and $i $o -}}fwd
+{{- else if $i -}}in
+{{- else if $o -}}out
+{{- else -}}-{{- end -}}`
+		}
+
+		stage.template {
+			source   = "proto"
+			template = `{{- $p := lower (default "" .fw_proto) -}}
+{{- if eq $p "tcp" -}}tcp
+{{- else if eq $p "udp" -}}udp
+{{- else if eq $p "icmp" -}}icmp
+{{- else if eq $p "icmpv6" -}}icmpv6
+{{- else -}}other{{- end -}}`
+		}
+
+		stage.template {
+			source   = "class"
+			template = `{{- $ip := lower (default "" .dst_ip) -}}
+{{- $port := default "" .dst_port -}}
+{{- $proto := default "" .proto -}}
+{{- if and (or (eq $ip "224.0.0.251") (eq $ip "ff02::fb")) (eq $port "5353") -}}mdns
+{{- else if and (eq $ip "239.255.255.250") (eq $port "1900") -}}ssdp
+{{- else if and (or (eq $ip "224.0.0.252") (eq $ip "ff02::1:3")) (eq $port "5355") -}}llmnr
+{{- else if and (eq $proto "udp") (eq $port "137") -}}nbns
+{{- else if regexMatch "^(22[4-9]|23[0-9])\\." $ip -}}multicast
+{{- else if regexMatch "^ff[0-9a-f][0-9a-f]:" $ip -}}multicast
+{{- else if eq $ip "255.255.255.255" -}}broadcast
+{{- else if regexMatch "^\\d+\\.\\d+\\.\\d+\\.255$" $ip -}}broadcast
+{{- else -}}unicast{{- end -}}`
+		}
+
+		// "<verdict> <zone> <dir>" prefixes give the zone; anything else is a
+		// rule name (fw4 per-rule log prefix).
+		stage.template {
+			source   = "zone"
+			template = `{{- $p := default "" .prefix -}}
+{{- if regexMatch "^(?i)(reject|drop|accept) \\S+ (in|forward|out)$" $p -}}{{ regexReplaceAll "^(?i)(reject|drop|accept) (\\S+) (in|forward|out)$" $p "${2}" }}{{- end -}}`
+		}
+
+		stage.template {
+			source   = "rule_name"
+			template = `{{- $p := default "" .prefix -}}
+{{- if and $p (not (regexMatch "^(?i)(reject|drop|accept) \\S+ (in|forward|out)$" $p)) -}}{{ $p }}{{- end -}}`
+		}
+
+		stage.template {
+			source   = "fw"
+			template = "fw4"
+		}
+
+		stage.template {
+			source   = "iface"
+			template = `{{ default "" .in_if }}{{ if and .in_if .out_if }}>{{ end }}{{ default "" .out_if }}`
+		}
+
+		stage.static_labels {
+			values = {
+				source = "owrt-fw",
+			}
+		}
+
+		stage.labels {
+			values = {
+				action    = "",
+				direction = "",
+				proto     = "",
+				class     = "",
+			}
+		}
+
+		stage.structured_metadata {
+			values = {
+				observer         = "",
+				fw               = "",
+				identity_quality = "",
+				inferred         = "",
+				src_ip           = "",
+				dst_ip           = "",
+				iface            = "",
+			}
+		}
+
+		stage.match {
+			selector = `{source="owrt-fw", proto=~"tcp|udp"}`
+
+			stage.structured_metadata {
+				values = {
+					src_port = "",
+					dst_port = "",
+				}
+			}
+		}
+
+		// zone and rule_name are mutually exclusive; attach whichever is set.
+		stage.template {
+			source   = "prefix_kind"
+			template = `{{ if .zone }}zone{{ else if .rule_name }}rule{{ else }}none{{ end }}`
+		}
+
+		stage.labels {
+			values = {
+				prefix_kind = "",
+			}
+		}
+
+		stage.match {
+			selector = `{prefix_kind="zone"}`
+
+			stage.structured_metadata {
+				values = {
+					zone = "",
+				}
+			}
+		}
+
+		stage.match {
+			selector = `{prefix_kind="rule"}`
+
+			stage.structured_metadata {
+				values = {
+					rule_name = "",
+				}
+			}
+		}
+
+		stage.label_drop {
+			values = ["prefix_kind"]
+		}
+	}
+
+	stage.match {
+		selector = `{router_class="dropbear"}`
+
+		stage.template {
+			source   = "action"
+			template = `{{- if .db_child -}}open
+{{- else if .db_method -}}accept
+{{- else if .db_fail -}}fail
+{{- else if .db_exit -}}close
+{{- else -}}other{{- end -}}`
+		}
+
+		stage.template {
+			source   = "method"
+			template = `{{- $m := lower (default "" .db_method) -}}
+{{- if eq $m "pubkey" -}}publickey{{- else if eq $m "password" -}}password{{- end -}}`
+		}
+
+		stage.template {
+			source   = "user"
+			template = `{{ default (default "" .user2) .user }}`
+		}
+
+		stage.template {
+			source   = "fingerprint"
+			template = `{{ if .fingerprint }}SHA256:{{ .fingerprint }}{{ end }}`
+		}
+
+		stage.template {
+			source   = "service"
+			template = "dropbear"
+		}
+
+		stage.template {
+			source   = "direction"
+			template = "-"
+		}
+
+		stage.template {
+			source   = "line"
+			template = `{{- $d := dict "action" (default "" .action) -}}
+{{- range $k, $v := dict "method" (default "" .method) "user" (default "" .user) "src_ip" (default "" .src_ip) "src_port" (default "" .src_port) "fingerprint" (default "" .fingerprint) "reason" (default "" .reason) -}}
+{{- if $v -}}{{- $_ := set $d $k $v -}}{{- end -}}
+{{- end -}}
+{{ $d | toJson }}`
+		}
+
+		stage.static_labels {
+			values = {
+				source = "dropbear",
+			}
+		}
+
+		stage.labels {
+			values = {
+				action    = "",
+				direction = "",
+			}
+		}
+
+		stage.structured_metadata {
+			values = {
+				observer         = "",
+				service          = "",
+				identity_quality = "",
+				inferred         = "",
+				src_ip           = "",
+				src_port         = "",
+			}
+		}
+
+		// Optional per-pattern fields, attached only when present.
+		stage.template {
+			source   = "db_opt"
+			template = `{{ if .user }}u{{ end }}{{ if .method }}m{{ end }}{{ if .fingerprint }}f{{ end }}{{ if .reason }}r{{ end }}`
+		}
+
+		stage.labels {
+			values = {
+				db_opt = "",
+			}
+		}
+
+		stage.match {
+			selector = `{db_opt=~".*u.*"}`
+
+			stage.structured_metadata {
+				values = {
+					user = "",
+				}
+			}
+		}
+
+		stage.match {
+			selector = `{db_opt=~".*m.*"}`
+
+			stage.structured_metadata {
+				values = {
+					method = "",
+				}
+			}
+		}
+
+		stage.match {
+			selector = `{db_opt=~".*f.*"}`
+
+			stage.structured_metadata {
+				values = {
+					fingerprint = "",
+				}
+			}
+		}
+
+		stage.match {
+			selector = `{db_opt=~".*r.*"}`
+
+			stage.structured_metadata {
+				values = {
+					reason = "",
+				}
+			}
+		}
+
+		stage.label_drop {
+			values = ["db_opt"]
+		}
+
+		// The stored line is the sanitized record, never the raw message.
+		stage.output {
+			source = "line"
+		}
+	}
+
+	stage.label_drop {
+		values = ["program", "router_class", "filename"]
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Log gateway container log (source=gateway): the nginx access/error log bind
+// mounted at grafana/pilot/logs/gateway/ (CONTRACT). NT SERVICE\Alloy needs a
+// read ACL on that directory (install-alloy.ps1 grants it).
+// ---------------------------------------------------------------------------
+local.file_match "gateway" {
+	path_targets = [
+		{__path__ = "C:/Users/david/Repos/grafana/pilot/logs/gateway/*.log"},
+	]
+	sync_period = "30s"
+}
+
+loki.source.file "gateway" {
+	targets    = local.file_match.gateway.targets
+	forward_to = [loki.process.gateway.receiver]
+}
+
+loki.process "gateway" {
+	forward_to = [loki.write.gateway.receiver]
+
+	// The gateway writes JSON access lines (pilot/gateway/nginx.conf log_format
+	// gateway_json: time, status, remote_addr, user, method, path, ...); error-log
+	// lines are not JSON, extract nothing and are kept with action=other.
+	// (2026-09-17 live fix: the earlier combined-format regex never matched, so
+	// every line was action=other without src_ip/user.)
+	stage.json {
+		expressions = {
+			status = "status",
+			src_ip = "remote_addr",
+			user   = "user",
+			method = "method",
+			path   = "path",
+		}
+		drop_malformed = false
+	}
+
+	// Self-feedback and noise guard (2026-09-17 live finding): every successful
+	// push is logged as a 204 line, which this tailer would ship, which logs
+	// another 204 line ... (~1 entry/s for ever, 1,608 entries in 45 min). Drop
+	// 2xx pushes (delivery is visible in each collector's own loki_write_*
+	// counters) and the compose healthcheck (GET / -> 403 from 127.0.0.1 every
+	// 30 s). Rejects and failures from real clients stay.
+	stage.template {
+		source   = "noise"
+		template = `{{- $s := default "" .status -}}
+{{- $p := default "" .path -}}
+{{- $ip := default "" .src_ip -}}
+{{- if and (regexMatch "^2" $s) (eq $p "/loki/api/v1/push") -}}yes
+{{- else if and (eq $s "403") (eq $p "/") (eq $ip "127.0.0.1") -}}yes
+{{- else -}}no{{- end -}}`
+	}
+
+	stage.drop {
+		source              = "noise"
+		value               = "yes"
+		drop_counter_reason = "gateway_noise"
+	}
+
+	stage.template {
+		source   = "action"
+		template = `{{- $s := default "" .status -}}
+{{- if not $s -}}other
+{{- else if regexMatch "^2" $s -}}accept
+{{- else if or (eq $s "401") (eq $s "403") (eq $s "405") (eq $s "404") -}}reject
+{{- else if regexMatch "^[45]" $s -}}fail
+{{- else -}}other{{- end -}}`
+	}
+
+	stage.template {
+		source   = "observer"
+		template = "ryzen"
+	}
+
+	stage.template {
+		source   = "service"
+		template = "log-gateway"
+	}
+
+	stage.template {
+		source   = "identity_quality"
+		template = "none"
+	}
+
+	stage.static_labels {
+		values = {
+			source    = "gateway",
+			direction = "-",
+		}
+	}
+
+	stage.labels {
+		values = {
+			action = "",
+		}
+	}
+
+	stage.structured_metadata {
+		values = {
+			observer         = "",
+			service          = "",
+			identity_quality = "",
+		}
+	}
+
+	stage.match {
+		selector = `{source="gateway", action=~"accept|reject|fail"}`
+
+		stage.structured_metadata {
+			values = {
+				src_ip = "",
+				user   = "",
+				reason = "status",
+			}
+		}
+	}
+
+	stage.label_drop {
+		values = ["filename"]
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Delivery: TLS push-only gateway, per-collector basic auth (CONTRACT D3/D6).
+// max_backoff_retries = 2000: with min 500ms doubling to the 5m cap the first
+// ~10 retries take ~8.5 min, then every retry waits 5 min, so 2000 retries keep
+// a batch alive for ~166 h, just inside Loki's reject_old_samples_max_age of
+// 168 h; a larger budget buys nothing because older samples are rejected (400)
+// and 4xx other than 429 are never retried (client/shards.go sendBatch). The
+// WAL stays off: experimental, and the M3 corrections (section 5) showed it did
+// not recover in-flight entries after a SIGKILL.
+// ---------------------------------------------------------------------------
+loki.write "gateway" {
+	endpoint {
+		url                 = "https://192.168.1.100:3443/loki/api/v1/push"
+		batch_wait          = "1s"
+		batch_size          = "1MiB"
+		remote_timeout      = "10s"
+		min_backoff_period  = "500ms"
+		max_backoff_period  = "5m"
+		max_backoff_retries = 2000
+		retry_on_http_429   = true
+
+		basic_auth {
+			username      = "alloy-ryzen"
+			password_file = "C:\\ProgramData\\GrafanaLabs\\Alloy\\secrets\\alloy-ryzen.password"
+		}
+
+		tls_config {
+			ca_file = "C:\\ProgramData\\GrafanaLabs\\Alloy\\secrets\\ca.crt"
+		}
+	}
+
+	external_labels = {
+		host = "ryzen",
+	}
+
+	// Enable only if evidence/m3/delivery-recovery-2026-09-16.md proves recovery.
+	// wal {
+	//   enabled         = true
+	//   max_segment_age = "1h"
+	//   drain_timeout   = "30s"
+	// }
+}

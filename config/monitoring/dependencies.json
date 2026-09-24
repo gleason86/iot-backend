@@ -1,0 +1,347 @@
+{
+  "version": 1,
+  "host": "ryzen",
+  "observer": "ryzen",
+  "evidence_date": "2026-09-16",
+  "notes": [
+    "Ryzen PC (192.168.1.100 / 10.77.77.1, Windows 11 Pro 26200, Docker Desktop) service manifest for the household observability pilot. Schema = threadripper/config/monitoring/dependencies.json version 1 plus the A\u00a71.3 superset fields (tier, freshness_s, notes, probe_from). Written 2026-09-16 by the M3 evaluator worker; owner: iot-backend (host), grafana (grafana*, pilot containers), Networking (net-pollers).",
+    "Evidence: iot-backend/docker-compose.yml (mosquitto :1883/:9001, influxdb :8086, telegraf), iot-backend/telegraf/telegraf.conf (inputs.mqtt_consumer servers tcp://mosquitto:1883, outputs.influxdb_v2 http://influxdb:8086), grafana/docker-compose.yml (grafana :3000, external network iot-backend_iot-network), Networking/docker-compose.yml (net-pollers on iot-backend_iot-network writing http://influxdb:8086), iot-backend/scripts/install-recovery-task.ps1 + docs/recovery-job-2026-09-15.md (task 'IoT Backend Verified Encrypted Recovery' 03:15 Pacific, D:/Backups/iot-backend/status.json + latest.json), grafana/tools/install_recovery_task.ps1 + docs/recovery-checkpoint-2026-09-11.md (task 'Grafana Verified Encrypted Recovery' 03:30 Pacific, D:/Backups/grafana/latest.json), grafana/pilot/CONTRACT.md compose table (loki, log-gateway, household-evaluator, security-aggregator, obs-test-probe), grafana/docs/household-observability/inventory.md (guides container seen live in docker ps, 2026-09-16).",
+    "D11: the Telegraf Docker container input is omitted from the first pilot, so a node whose only check is docker_container is declared unprobed:true (the check stays declared for the Ryzen service_health.py port to enable later). Nodes with an http/tcp check are probed. Checks carrying probe_from=household-evaluator are executed by the household evaluator container itself on iot-backend_iot-network (it can reach influxdb, mosquitto, grafana and obs-test-probe by service name; the host port cannot see obs-test-probe, which publishes no port).",
+    "Staged (grafana/pilot, docker-compose.pilot.yml, unapplied as of 2026-09-16): alloy, telegraf-host, loki, log-gateway, household-evaluator, security-aggregator, obs-test-probe. They are declared expected_state=active so the household evaluator renders them unknown (never healthy) until the attended apply step; flip nothing here at apply time.",
+    "tcp is not in the A\u00a71.1 Windows check-type list (docker_container, http, scheduled_task, file_mtime, disk_free, windows_service); it is used once (mosquitto :1883 has no HTTP endpoint) and reported as a deviation in evidence/m3/evaluator-manifests-2026-09-16.md.",
+    "Not declared (not evidenced in compose files/docs read for this manifest): the 9 mcp-grafana-* sidecars (stale, TODO 21/36), the Hyper-V/WSL runtime, the NordLynx VPN, the Windows Task Scheduler itself. Docker Desktop's engine service name is not evidenced in any repo, so 'docker' is unprobed rather than guessed.",
+    "Disk thresholds on os are proposals by this manifest, not a documented owner contract: C: hosts the Docker Desktop VM disk (65.5 GB free / 249 GB on 2026-09-16); D: hosts the recovery checkpoints with a documented 20 GiB free reserve (iot-backend/docs/recovery-and-continuity-2026-09-11.md)."
+  ],
+  "defaults": {
+    "http_timeout_seconds": 5,
+    "command_timeout_seconds": 10,
+    "budget_seconds": 20,
+    "future_skew_seconds": 60,
+    "freshness_s": 180
+  },
+  "allowlist": {
+    "http_hosts": ["127.0.0.1", "192.168.1.100", "influxdb", "grafana", "obs-test-probe"],
+    "tcp_hosts": ["127.0.0.1", "mosquitto"],
+    "file_paths": ["D:/Backups/iot-backend/latest.json", "D:/Backups/iot-backend/status.json", "D:/Backups/grafana/latest.json"],
+    "disk_paths": ["C:/", "D:/"],
+    "scheduled_tasks": ["IoT Backend Verified Encrypted Recovery", "Grafana Verified Encrypted Recovery"],
+    "windows_services": ["telegraf", "Alloy"]
+  },
+  "services": [
+    {
+      "id": "os",
+      "title": "Ryzen Windows host (C: Docker VM disk, D: checkpoints)",
+      "kind": "host",
+      "owner": "iot-backend",
+      "tier": "infra",
+      "expected_state": "active",
+      "schedule": "continuous",
+      "runbook": "docs/recovery-and-continuity-2026-09-11.md",
+      "checks": [
+        {"type": "disk_free", "name": "c_free", "path": "C:/", "degraded_below_bytes": 21474836480, "failed_below_bytes": 10737418240},
+        {"type": "disk_free", "name": "d_free", "path": "D:/", "degraded_below_bytes": 42949672960, "failed_below_bytes": 21474836480}
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "docker",
+      "title": "Docker Desktop engine (WSL2 VM)",
+      "kind": "service",
+      "owner": "iot-backend",
+      "tier": "infra",
+      "expected_state": "active",
+      "schedule": "continuous",
+      "runbook": "docs/mqtt-outage-2026-09-16.md",
+      "unprobed": false,
+      "notes": "No direct engine probe in the first pilot: the Docker input is omitted (D11) and the named pipe needs docker-users. The Windows service com.docker.service ('Docker Desktop Service') exists but was observed Stopped while every container was running (read-only Get-Service on the Ryzen, 2026-09-16 22:40 UTC), so it is not an engine-up signal. Engine state is therefore INFERRED by the household evaluator: healthy while any probed container on this host reports fresh healthy/degraded, otherwise unknown (never failed: all containers stopped, as after the 2026-09-15 reboot, is not proof the engine is down).",
+      "checks": [
+        {"type": "derived", "name": "inferred_from_containers", "rule": "any_dependent_healthy", "note": "evaluated by the household evaluator from this host's service_health rows of the nodes that depend on docker"}
+      ],
+      "depends_on": [
+        {"service": "os", "type": "hard", "capability": "VM disk on C:, host networking"}
+      ]
+    },
+    {
+      "id": "influxdb",
+      "title": "InfluxDB 2 primary (container iot-influxdb, :8086)",
+      "kind": "service",
+      "owner": "iot-backend",
+      "tier": "3",
+      "expected_state": "active",
+      "schedule": "continuous",
+      "runbook": "docs/recovery-and-continuity-2026-09-11.md",
+      "resilience_note": "Cold standby influxdb-standby on the Threadripper is a disabled recovery target restored from the nightly encrypted checkpoint (24 h RPO), not a replica; readiness evidence is in household.json.",
+      "checks": [
+        {"type": "http", "name": "health", "url": "http://127.0.0.1:8086/health", "expect_status": [200]},
+        {"type": "http", "name": "health_from_evaluator", "url": "http://influxdb:8086/health", "expect_status": [200], "probe_from": "household-evaluator"},
+        {"type": "docker_container", "name": "container", "container": "iot-influxdb", "expect": "running"}
+      ],
+      "depends_on": [
+        {"service": "docker", "type": "hard", "capability": "container runtime"},
+        {"service": "os", "type": "hard", "capability": "volumes iot-backend_influxdb_data/config on the Docker VM disk"}
+      ]
+    },
+    {
+      "id": "mosquitto",
+      "title": "Mosquitto MQTT broker (container iot-mosquitto, :1883/:9001)",
+      "kind": "service",
+      "owner": "iot-backend",
+      "tier": "2",
+      "expected_state": "active",
+      "schedule": "continuous",
+      "runbook": "docs/mqtt-outage-2026-09-16.md",
+      "notes": "Was down 2026-09-15 05:07 to 2026-09-16 05:40 UTC unnoticed (no probe existed); restart policy alone did not bring it back after the host reboot.",
+      "checks": [
+        {"type": "tcp", "name": "listener", "host": "127.0.0.1", "port": 1883},
+        {"type": "tcp", "name": "listener_from_evaluator", "host": "mosquitto", "port": 1883, "probe_from": "household-evaluator"},
+        {"type": "docker_container", "name": "container", "container": "iot-mosquitto", "expect": "running"}
+      ],
+      "depends_on": [
+        {"service": "docker", "type": "hard", "capability": "container runtime"},
+        {"service": "os", "type": "hard", "capability": "volumes iot-backend_mosquitto_data/log"}
+      ]
+    },
+    {
+      "id": "iot-telegraf",
+      "title": "IoT Telegraf pipeline MQTT -> InfluxDB (container iot-telegraf)",
+      "kind": "service",
+      "owner": "iot-backend",
+      "tier": "infra",
+      "expected_state": "active",
+      "schedule": "continuous",
+      "runbook": "docs/infra-monitoring-2026-09-15.md",
+      "unprobed": true,
+      "checks": [
+        {"type": "docker_container", "name": "container", "container": "iot-telegraf", "expect": "running"}
+      ],
+      "depends_on": [
+        {"service": "mosquitto", "type": "hard", "capability": "inputs.mqtt_consumer servers tcp://mosquitto:1883; the container restart-loops on DNS failure while the broker is down", "grace_seconds": 0},
+        {"service": "influxdb", "type": "soft", "capability": "outputs.influxdb_v2 http://influxdb:8086; memory buffering only, bounded loss", "grace_seconds": 300},
+        {"service": "docker", "type": "hard", "capability": "container runtime"}
+      ]
+    },
+    {
+      "id": "net-pollers",
+      "title": "Network device pollers (container net-pollers: modem, Starlink, Aruba, Orbi)",
+      "kind": "service",
+      "owner": "Networking",
+      "tier": "infra",
+      "expected_state": "active",
+      "schedule": "continuous; exec inputs every 1-5 min",
+      "runbook": "../Networking/pollers/README.md",
+      "unprobed": true,
+      "checks": [
+        {"type": "docker_container", "name": "container", "container": "net-pollers", "expect": "running"}
+      ],
+      "depends_on": [
+        {"service": "docker", "type": "hard", "capability": "container runtime"},
+        {"service": "influxdb", "type": "soft", "capability": "writes bucket network at http://influxdb:8086; Telegraf memory buffering", "grace_seconds": 300}
+      ]
+    },
+    {
+      "id": "grafana",
+      "title": "Grafana 13.2.1 (container grafana, :3000)",
+      "kind": "service",
+      "owner": "grafana",
+      "tier": "infra",
+      "expected_state": "active",
+      "schedule": "continuous",
+      "runbook": "../grafana/docs/recovery-checkpoint-2026-09-11.md",
+      "checks": [
+        {"type": "http", "name": "health", "url": "http://127.0.0.1:3000/api/health", "expect_status": [200]},
+        {"type": "http", "name": "health_from_evaluator", "url": "http://grafana:3000/api/health", "expect_status": [200], "probe_from": "household-evaluator"},
+        {"type": "docker_container", "name": "container", "container": "grafana", "expect": "running"}
+      ],
+      "depends_on": [
+        {"service": "influxdb", "type": "hard", "capability": "Flux datasource P951FEA4DE68E13C5"},
+        {"service": "docker", "type": "hard", "capability": "container runtime"},
+        {"service": "os", "type": "hard", "capability": "volume grafana_grafana_data; provisioning and dashboards bind mounts"}
+      ]
+    },
+    {
+      "id": "guides",
+      "title": "guides container (personal site; docker ps 2026-09-16: 0.0.0.0:8080->80/tcp, network guides_default)",
+      "kind": "service",
+      "owner": "unknown",
+      "tier": "4",
+      "expected_state": "active",
+      "schedule": "continuous",
+      "runbook": "",
+      "notes": "Never stopped for a test (D12). Tier 4 = ranked last; the brief defines no tier for it. Not on iot-network, so only the host port can probe it (published port seen live in docker ps, no repo evidence).",
+      "checks": [
+        {"type": "http", "name": "root", "url": "http://127.0.0.1:8080/", "expect_status": [200]},
+        {"type": "docker_container", "name": "container", "container": "guides", "expect": "running"}
+      ],
+      "depends_on": [
+        {"service": "docker", "type": "hard", "capability": "container runtime"}
+      ]
+    },
+    {
+      "id": "iot-recovery",
+      "title": "IoT Backend Verified Encrypted Recovery (Task Scheduler, 03:15 Pacific)",
+      "kind": "job",
+      "owner": "iot-backend",
+      "tier": "3",
+      "expected_state": "scheduled",
+      "schedule": "daily 03:15 America/Los_Angeles; max age 24 h plus 2 h grace",
+      "runbook": "docs/recovery-job-2026-09-15.md",
+      "checks": [
+        {"type": "scheduled_task", "name": "task", "task": "IoT Backend Verified Encrypted Recovery", "expect_result": 0, "max_age_seconds": 93600},
+        {"type": "file_mtime", "name": "latest_success", "path": "D:/Backups/iot-backend/latest.json", "max_age_seconds": 93600}
+      ],
+      "depends_on": [
+        {"service": "influxdb", "type": "batch", "capability": "online native backup API", "grace_seconds": 0},
+        {"service": "mosquitto", "type": "batch", "capability": "MQTT stage: docker kill --signal SIGUSR1 iot-mosquitto then persistence export; fails immediately while the broker is stopped", "grace_seconds": 0},
+        {"service": "docker", "type": "batch", "capability": "isolated restore container", "grace_seconds": 0},
+        {"service": "os", "type": "hard", "capability": "D:/Backups/iot-backend staging and 20 GiB reserve"}
+      ]
+    },
+    {
+      "id": "grafana-recovery-checkpoint",
+      "title": "Grafana Verified Encrypted Recovery (Task Scheduler, 03:30 Pacific)",
+      "kind": "job",
+      "owner": "grafana",
+      "tier": "3",
+      "expected_state": "scheduled",
+      "schedule": "daily 03:30 America/Los_Angeles; max age 24 h plus 2 h grace",
+      "runbook": "../grafana/docs/recovery-checkpoint-2026-09-11.md",
+      "checks": [
+        {"type": "scheduled_task", "name": "task", "task": "Grafana Verified Encrypted Recovery", "expect_result": 0, "max_age_seconds": 93600},
+        {"type": "file_mtime", "name": "latest_success", "path": "D:/Backups/grafana/latest.json", "max_age_seconds": 93600}
+      ],
+      "depends_on": [
+        {"service": "grafana", "type": "batch", "capability": "consistent database checkpoint of the running container", "grace_seconds": 0},
+        {"service": "docker", "type": "batch", "capability": "isolated boot of the restored checkpoint", "grace_seconds": 0},
+        {"service": "os", "type": "hard", "capability": "D:/Backups/grafana"}
+      ]
+    },
+    {
+      "id": "telegraf-host",
+      "title": "Host Telegraf (Windows service, runs the Ryzen service_health.py port) [staged]",
+      "kind": "monitor",
+      "owner": "iot-backend",
+      "tier": "infra",
+      "expected_state": "active",
+      "schedule": "continuous; staged in iot-backend/host/telegraf",
+      "runbook": "host/telegraf/README.md",
+      "checks": [
+        {"type": "windows_service", "name": "service", "service": "telegraf", "expect": "Running"}
+      ],
+      "depends_on": [
+        {"service": "os", "type": "hard", "capability": "agent runtime"},
+        {"service": "influxdb", "type": "soft", "capability": "writes bucket infra; memory buffering", "grace_seconds": 300}
+      ]
+    },
+    {
+      "id": "alloy",
+      "title": "Grafana Alloy log collector (Windows service NT SERVICE\\Alloy) [staged]",
+      "kind": "monitor",
+      "owner": "iot-backend",
+      "tier": "infra",
+      "expected_state": "active",
+      "schedule": "continuous; staged in iot-backend/host/alloy",
+      "runbook": "host/alloy/README.md",
+      "checks": [
+        {"type": "windows_service", "name": "service", "service": "Alloy", "expect": "Running"}
+      ],
+      "depends_on": [
+        {"service": "os", "type": "hard", "capability": "pfirewall.log and event channels"},
+        {"service": "log-gateway", "type": "soft", "capability": "push target https://192.168.1.100:3443; retries bounded, crash delivery not lossless (A\u00a73.3)", "grace_seconds": 300}
+      ]
+    },
+    {
+      "id": "loki",
+      "title": "Loki 3.7.7 (container grafana-loki, household-logs network only) [staged]",
+      "kind": "service",
+      "owner": "grafana",
+      "tier": "infra",
+      "expected_state": "active",
+      "schedule": "continuous",
+      "runbook": "../grafana/pilot/CONTRACT.md",
+      "unprobed": true,
+      "notes": "No host port and not on iot-network by design (A\u00a73.2); neither the host port nor the household evaluator can reach it. Coverage comes from Telegraf inputs.prometheus on /metrics once the aggregator path is live.",
+      "checks": [
+        {"type": "docker_container", "name": "container", "container": "grafana-loki", "expect": "running"}
+      ],
+      "depends_on": [
+        {"service": "docker", "type": "hard", "capability": "container runtime"},
+        {"service": "os", "type": "hard", "capability": "volume grafana_loki_data on the Docker VM disk (C:)"}
+      ]
+    },
+    {
+      "id": "log-gateway",
+      "title": "Log gateway nginx (container grafana-log-gateway, 192.168.1.100:3443 / 10.77.77.1:3443) [staged]",
+      "kind": "service",
+      "owner": "grafana",
+      "tier": "infra",
+      "expected_state": "active",
+      "schedule": "continuous",
+      "runbook": "../grafana/pilot/CONTRACT.md",
+      "notes": "Every path except POST /loki/api/v1/push answers 405/403, so a rejected GET is the healthy reading. TLS is issued by the gateway-local CA: the probe must trust pilot/secrets/gateway/ca.crt or report unknown, never disable verification.",
+      "checks": [
+        {"type": "http", "name": "reject_get", "url": "https://192.168.1.100:3443/", "expect_status": [403, 405], "tls_ca": "pilot/secrets/gateway/ca.crt"},
+        {"type": "docker_container", "name": "container", "container": "grafana-log-gateway", "expect": "running"}
+      ],
+      "depends_on": [
+        {"service": "docker", "type": "hard", "capability": "container runtime"},
+        {"service": "loki", "type": "hard", "capability": "proxy target http://loki:3100/loki/api/v1/push"}
+      ]
+    },
+    {
+      "id": "household-evaluator",
+      "title": "Household dependency evaluator (container grafana-household-evaluator, 60 s) [staged]",
+      "kind": "monitor",
+      "owner": "grafana",
+      "tier": "infra",
+      "expected_state": "active",
+      "schedule": "continuous; writes household_* to infra every 60 s",
+      "runbook": "../grafana/pilot/evaluator/household_evaluator.py",
+      "notes": "Self-reported: the evaluator writes its own row (healthy while it runs) and household_run; a stale household_run is the outage signal.",
+      "checks": [
+        {"type": "docker_container", "name": "container", "container": "grafana-household-evaluator", "expect": "running"}
+      ],
+      "depends_on": [
+        {"service": "docker", "type": "hard", "capability": "container runtime"},
+        {"service": "influxdb", "type": "hard", "capability": "reads infra/network, writes infra"}
+      ]
+    },
+    {
+      "id": "security-aggregator",
+      "title": "Security aggregator (container grafana-security-aggregator, 15 min) [staged]",
+      "kind": "monitor",
+      "owner": "grafana",
+      "tier": "infra",
+      "expected_state": "active",
+      "schedule": "every 15 min; writes bucket security",
+      "runbook": "../grafana/pilot/CONTRACT.md",
+      "unprobed": true,
+      "notes": "Observed through its own aggregator_run row (bucket security) once live; no port.",
+      "checks": [
+        {"type": "docker_container", "name": "container", "container": "grafana-security-aggregator", "expect": "running"}
+      ],
+      "depends_on": [
+        {"service": "docker", "type": "hard", "capability": "container runtime"},
+        {"service": "influxdb", "type": "hard", "capability": "reads infra/network, writes security"},
+        {"service": "loki", "type": "hard", "capability": "query_range over the container network"}
+      ]
+    },
+    {
+      "id": "obs-test-probe",
+      "title": "Dedicated test service obs-test-probe (python http.server :8089, no published port) [staged, D12]",
+      "kind": "service",
+      "owner": "grafana",
+      "tier": "test",
+      "expected_state": "active",
+      "schedule": "continuous; the only service ever stopped for a live propagation demonstration",
+      "runbook": "../grafana/docs/household-observability/architecture-2026-09-16.md (section 8.3)",
+      "notes": "tier test: feeds no capability (the builder rejects any capability edge from it). Probed by the household evaluator over iot-network because it publishes no host port.",
+      "checks": [
+        {"type": "http", "name": "root_from_evaluator", "url": "http://obs-test-probe:8089/", "expect_status": [200], "probe_from": "household-evaluator"},
+        {"type": "docker_container", "name": "container", "container": "grafana-obs-test-probe", "expect": "running"}
+      ],
+      "depends_on": [
+        {"service": "docker", "type": "hard", "capability": "container runtime"}
+      ]
+    }
+  ]
+}

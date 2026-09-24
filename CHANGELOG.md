@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed (2026-09-17, first live install of the household pilot collectors)
+
+- `host/telegraf/install-telegraf.ps1`: the ProgramData ACL step used
+  `icacls /inheritance:r /grant:r ...(OI)(CI)... /T`, which also processed the files —
+  `(OI)(CI)` ACEs do not apply to files, so every file ended with an empty DACL and both
+  the service and the elevated operator got "open telegraf.conf: Access is denied". The
+  directory now gets the protected DACL and every existing child is `/reset` to inherit it.
+- `host/alloy/pfirewall-acl.ps1`: `icacls` cannot map a service SID before that service is
+  registered (error 1332 for `NT SERVICE\telegraf` when run before `install-telegraf.ps1`);
+  Apply now grants the services that exist, warns about the absent ones and is re-run after
+  their install (add-only, idempotent).
+- `host/alloy/config.alloy` gateway pipeline: the access log is JSON (`gateway_json`), not
+  the combined format the regex expected, so every line was `action=other`; and every
+  successful push was logged, shipped, logged again — a self-feeding loop of ~1 entry/s
+  (1,608 `source=gateway` entries in 45 min). The pipeline now parses the JSON, drops 2xx
+  pushes and the compose healthcheck (`drop_counter_reason=gateway_noise`) and keeps
+  rejects/failures/error-log lines (isolated proof on the pinned image).
+- `host/alloy/install-alloy.ps1` gains `-Mode UpdateConfig` (validate, back up, copy,
+  `POST /-/reload`; no service restart) for config changes after the install.
+- `host/telegraf/install-telegraf.ps1`: adds `NT SERVICE	elegraf` to *Performance Monitor
+  Users* (the Perflib key is not readable by a virtual service account, so
+  `inputs.win_perf_counters` produced nothing); rollback removes it. Step 2 repairs the
+  ProgramData ACLs before touching files; the non-elevated preflight tolerates protected paths.
+  `host_session` stays `unknown` on the Ryzen: `quser` cannot enumerate sessions under the
+  virtual account (documented limitation, sessions come from the LSM events in Loki).
+
 ### Added
 - Verified encrypted InfluxDB/MQTT recovery, daily independent copies, a disabled
   native Threadripper standby, read-only freshness monitoring and disposable

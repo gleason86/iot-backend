@@ -1,0 +1,279 @@
+{
+  "version": 1,
+  "host": "ryzen",
+  "observer": "ryzen",
+  "evidence_date": "2026-09-16",
+  "notes": [
+    "Test fixture for iot-backend/host/monitoring/service_health.ps1 -SelfTest only. The deployed manifest is iot-backend/config/monitoring/dependencies.json (evaluator worker); this file mirrors its schema, not its contents.",
+    "Existing task and service names are used read-only. hs-selftest-missing does not exist by design. 127.0.0.1:1 is a closed port. The fake-probe pass makes every outcome deterministic; the live pass checks structure only."
+  ],
+  "defaults": {
+    "http_timeout_seconds": 2,
+    "tcp_timeout_seconds": 2,
+    "command_timeout_seconds": 10,
+    "budget_seconds": 20,
+    "future_skew_seconds": 60
+  },
+  "allowlist": {
+    "http_hosts": ["localhost", "127.0.0.1"],
+    "tcp_hosts": ["127.0.0.1"],
+    "file_paths": ["C:\\Users\\david\\Repos\\iot-backend\\host\\monitoring\\tests\\fixture-mtime.txt"],
+    "disk_paths": ["C:/"],
+    "scheduled_tasks": ["IoT Backend Verified Encrypted Recovery", "Grafana Verified Encrypted Recovery", "Networking nightly backup", "Networking modem poll", "hs-selftest-missing"],
+    "windows_services": ["W32Time", "com.docker.service", "hs-selftest-missing"]
+  },
+  "services": [
+    {
+      "id": "os",
+      "title": "Windows 11 and the C: system volume",
+      "kind": "host",
+      "owner": "iot-backend",
+      "expected_state": "active",
+      "schedule": "continuous",
+      "checks": [
+        {"type": "disk_free", "name": "c_free", "path": "C:/", "degraded_below_bytes": 21474836480, "failed_below_bytes": 10737418240}
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "lan",
+      "title": "Household LAN path",
+      "kind": "external",
+      "owner": "Networking",
+      "expected_state": "external",
+      "schedule": "continuous",
+      "unprobed": true,
+      "checks": [
+        {"type": "none", "name": "declared", "reason": "no_probe_declared;observer_shares_this_path"}
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "docker",
+      "title": "Docker Desktop engine (derived by the household evaluator)",
+      "kind": "service",
+      "owner": "iot-backend",
+      "expected_state": "active",
+      "schedule": "continuous",
+      "checks": [
+        {"type": "derived", "name": "inferred_from_containers", "rule": "any_dependent_healthy"}
+      ],
+      "depends_on": [
+        {"service": "os", "type": "hard", "capability": "engine on the OS"}
+      ]
+    },
+    {
+      "id": "influxdb",
+      "title": "InfluxDB 2 container (:8086)",
+      "kind": "service",
+      "owner": "iot-backend",
+      "expected_state": "active",
+      "schedule": "continuous",
+      "checks": [
+        {"type": "http", "name": "health", "url": "http://127.0.0.1:8086/health", "expect_status": [200]},
+        {"type": "http", "name": "health_from_evaluator", "url": "http://influxdb:8086/health", "expect_status": [200], "probe_from": "household-evaluator"},
+        {"type": "docker_container", "name": "container", "container": "iot-influxdb", "expect": "running"}
+      ],
+      "depends_on": [
+        {"service": "docker", "type": "hard", "capability": "container runtime"}
+      ]
+    },
+    {
+      "id": "grafana",
+      "title": "Grafana container (:3000)",
+      "kind": "service",
+      "owner": "grafana",
+      "expected_state": "active",
+      "schedule": "continuous",
+      "checks": [
+        {"type": "http", "name": "health", "url": "http://localhost:3000/api/health", "expect_status": [200]},
+        {"type": "docker_container", "name": "container", "container": "grafana", "expect": "running"}
+      ],
+      "depends_on": [
+        {"service": "influxdb", "type": "soft", "grace_seconds": 300, "capability": "datasource"},
+        {"service": "lan", "type": "soft", "capability": "viewers"}
+      ]
+    },
+    {
+      "id": "mosquitto",
+      "title": "Mosquitto broker (:1883)",
+      "kind": "service",
+      "owner": "iot-backend",
+      "expected_state": "active",
+      "schedule": "continuous",
+      "checks": [
+        {"type": "tcp", "name": "listener", "host": "127.0.0.1", "port": 1883},
+        {"type": "docker_container", "name": "container", "container": "iot-mosquitto", "expect": "running"}
+      ],
+      "depends_on": [
+        {"service": "docker", "type": "hard", "capability": "container runtime"}
+      ]
+    },
+    {
+      "id": "iot-telegraf",
+      "title": "Container Telegraf (MQTT to InfluxDB)",
+      "kind": "service",
+      "owner": "iot-backend",
+      "expected_state": "active",
+      "schedule": "continuous",
+      "checks": [
+        {"type": "docker_container", "name": "container", "container": "iot-telegraf", "expect": "running"}
+      ],
+      "depends_on": [
+        {"service": "mosquitto", "type": "hard", "capability": "broker"},
+        {"service": "influxdb", "type": "hard", "capability": "writes"}
+      ]
+    },
+    {
+      "id": "iot-recovery",
+      "title": "IoT Backend Verified Encrypted Recovery (daily task)",
+      "kind": "job",
+      "owner": "iot-backend",
+      "expected_state": "scheduled",
+      "schedule": "daily 03:15",
+      "checks": [
+        {"type": "scheduled_task", "name": "task", "task": "IoT Backend Verified Encrypted Recovery", "expect_result": 0, "max_age_seconds": 93600},
+        {"type": "file_mtime", "name": "fixture_file", "path": "C:\\Users\\david\\Repos\\iot-backend\\host\\monitoring\\tests\\fixture-mtime.txt", "max_age_seconds": 315360000}
+      ],
+      "depends_on": [
+        {"service": "influxdb", "type": "batch", "capability": "backup source"}
+      ]
+    },
+    {
+      "id": "grafana-recovery",
+      "title": "Grafana Verified Encrypted Recovery (daily task)",
+      "kind": "job",
+      "owner": "grafana",
+      "expected_state": "scheduled",
+      "schedule": "daily 03:30",
+      "checks": [
+        {"type": "scheduled_task", "name": "task", "task": "Grafana Verified Encrypted Recovery", "expect_result": 0, "max_age_seconds": 93600}
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "networking-backup",
+      "title": "Networking nightly backup (task)",
+      "kind": "job",
+      "owner": "Networking",
+      "expected_state": "scheduled",
+      "schedule": "nightly",
+      "checks": [
+        {"type": "scheduled_task", "name": "task", "task": "Networking nightly backup", "expect_result": 0, "max_age_seconds": 93600}
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "modem-poll",
+      "title": "Networking modem poll (disabled task)",
+      "kind": "job",
+      "owner": "Networking",
+      "expected_state": "inactive",
+      "schedule": "disabled",
+      "checks": [
+        {"type": "scheduled_task", "name": "task", "task": "Networking modem poll", "expect": "disabled"}
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "missing-task",
+      "title": "A task that does not exist",
+      "kind": "job",
+      "owner": "test",
+      "expected_state": "scheduled",
+      "schedule": "never",
+      "checks": [
+        {"type": "scheduled_task", "name": "task", "task": "hs-selftest-missing", "max_age_seconds": 60}
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "missing-service",
+      "title": "A service that does not exist",
+      "kind": "service",
+      "owner": "test",
+      "expected_state": "active",
+      "schedule": "continuous",
+      "checks": [
+        {"type": "windows_service", "name": "service", "service": "hs-selftest-missing", "expect": "Running"}
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "w32time",
+      "title": "Windows Time service",
+      "kind": "service",
+      "owner": "windows",
+      "expected_state": "active",
+      "schedule": "continuous",
+      "checks": [
+        {"type": "windows_service", "name": "service", "service": "W32Time", "expect": "Running"}
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "docker-desktop-service",
+      "title": "com.docker.service (Docker Desktop backend service)",
+      "kind": "service",
+      "owner": "iot-backend",
+      "expected_state": "active",
+      "schedule": "continuous",
+      "checks": [
+        {"type": "windows_service", "name": "service", "service": "com.docker.service", "expect": "Running"}
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "closed-port",
+      "title": "Nothing listens on 127.0.0.1:1",
+      "kind": "service",
+      "owner": "test",
+      "expected_state": "active",
+      "schedule": "continuous",
+      "checks": [
+        {"type": "http", "name": "get", "url": "http://127.0.0.1:1/", "expect_status": [200]}
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "ha-remote",
+      "title": "Home Assistant API expected 401 (not reachable from this fixture)",
+      "kind": "external",
+      "owner": "homeassistant",
+      "expected_state": "external",
+      "schedule": "continuous",
+      "checks": [
+        {"type": "http", "name": "api", "url": "http://127.0.0.1:8123/api/", "expect_status": [401]}
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "soft-consumer",
+      "title": "Soft dependant of closed-port",
+      "kind": "service",
+      "owner": "test",
+      "expected_state": "active",
+      "schedule": "continuous",
+      "checks": [
+        {"type": "windows_service", "name": "service", "service": "W32Time", "expect": "Running"}
+      ],
+      "depends_on": [
+        {"service": "closed-port", "type": "soft", "grace_seconds": 300, "capability": "feature"}
+      ]
+    },
+    {
+      "id": "hard-consumer",
+      "title": "Hard dependant of grafana-recovery",
+      "kind": "service",
+      "owner": "test",
+      "expected_state": "active",
+      "schedule": "continuous",
+      "checks": [
+        {"type": "windows_service", "name": "service", "service": "W32Time", "expect": "Running"}
+      ],
+      "depends_on": [
+        {"service": "grafana-recovery", "type": "hard", "capability": "checkpoint"}
+      ]
+    }
+  ]
+}

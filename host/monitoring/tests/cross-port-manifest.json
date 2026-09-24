@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "host": "crossport",
+  "observer": "crossport",
+  "notes": [
+    "Cross-port byte-identity fixture: rendered by homeassistant/host/monitoring/service_health.py (FakeProbes) and by iot-backend/host/monitoring/service_health.ps1 -CrossPort with the SAME fake answers (_fakes) at the same -Now; the two outputs must be identical after normalizing duration_ms. Only check types both ports implement are used; no unreachable cases (the failure type names differ per platform by design)."
+  ],
+  "_fakes": {
+    "http": {
+      "http://127.0.0.1:8086/health": [200, ""],
+      "http://127.0.0.1:3000/api/health": [503, ""],
+      "http://127.0.0.1:11434/api/tags": [200, "{\"models\":[{\"name\":\"qwen3:14b-q4_K_M\"},{\"name\":\"other\"}]}"],
+      "http://127.0.0.1:8123/api/": [401, ""]
+    },
+    "tcp": {"127.0.0.1:1883": true, "127.0.0.1:3000": true},
+    "disk_free": 68719476736
+  },
+  "defaults": {"http_timeout_seconds": 2, "budget_seconds": 20, "future_skew_seconds": 60},
+  "allowlist": {"http_hosts": ["127.0.0.1"], "tcp_hosts": ["127.0.0.1"], "disk_paths": ["/"]},
+  "services": [
+    {"id": "os", "expected_state": "active", "checks": [{"type": "disk_free", "name": "root_free", "path": "/", "degraded_below_bytes": 21474836480, "failed_below_bytes": 10737418240}], "depends_on": []},
+    {"id": "low-disk", "expected_state": "active", "checks": [{"type": "disk_free", "name": "root_free", "path": "/", "degraded_below_bytes": 107374182400, "failed_below_bytes": 10737418240}], "depends_on": []},
+    {"id": "lan", "expected_state": "external", "unprobed": true, "checks": [{"type": "none", "name": "declared", "reason": "no_probe_declared;observer_shares_this_path"}], "depends_on": []},
+    {"id": "docker", "expected_state": "active", "unprobed": false, "checks": [{"type": "derived", "name": "inferred_from_containers", "rule": "any_dependent_healthy"}], "depends_on": [{"service": "os", "type": "hard"}]},
+    {"id": "influx", "expected_state": "active", "checks": [
+      {"type": "http", "name": "health", "url": "http://127.0.0.1:8086/health", "expect_status": [200]},
+      {"type": "http", "name": "health_from_evaluator", "url": "http://influx:8086/health", "expect_status": [200], "probe_from": "household-evaluator"}
+    ], "depends_on": [{"service": "docker", "type": "hard", "capability": "runtime"}, {"service": "lan", "type": "soft"}]},
+    {"id": "grafana", "expected_state": "active", "checks": [{"type": "http", "name": "health", "url": "http://127.0.0.1:3000/api/health", "expect_status": [200]}], "depends_on": [{"service": "influx", "type": "soft", "grace_seconds": 300}]},
+    {"id": "ollama", "expected_state": "active", "checks": [{"type": "http", "name": "model", "url": "http://127.0.0.1:11434/api/tags", "expect_status": [200], "json_contains": {"list_path": "models", "item_key": "name", "value": "qwen3:14b-q4_K_M", "label": "qwen3", "missing_code": 1}}], "depends_on": []},
+    {"id": "ollama-missing", "expected_state": "active", "checks": [{"type": "http", "name": "model", "url": "http://127.0.0.1:11434/api/tags", "expect_status": [200], "json_contains": {"list_path": "models", "item_key": "name", "value": "nope", "label": "nope", "missing_code": 1}}], "depends_on": []},
+    {"id": "ha", "expected_state": "external", "checks": [{"type": "http", "name": "api", "url": "http://127.0.0.1:8123/api/", "expect_status": [401]}], "depends_on": [{"service": "lan", "type": "hard"}]},
+    {"id": "mosquitto", "expected_state": "active", "checks": [{"type": "tcp", "name": "listener", "host": "127.0.0.1", "port": 1883}], "depends_on": [{"service": "docker", "type": "hard"}]},
+    {"id": "consumer-soft", "expected_state": "active", "checks": [{"type": "tcp", "name": "ws", "host": "127.0.0.1", "port": 3000}], "depends_on": [{"service": "grafana", "type": "soft", "grace_seconds": 300}]},
+    {"id": "consumer-batch", "expected_state": "scheduled", "checks": [{"type": "tcp", "name": "ws", "host": "127.0.0.1", "port": 3000}], "depends_on": [{"service": "grafana", "type": "batch"}, {"service": "low-disk", "type": "hard"}]},
+    {"id": "consumer-hard", "expected_state": "active", "checks": [{"type": "tcp", "name": "ws", "host": "127.0.0.1", "port": 3000}], "depends_on": [{"service": "grafana", "type": "hard"}, {"service": "mosquitto", "type": "hard"}]},
+    {"id": "declared-only", "expected_state": "active", "checks": [{"type": "none", "name": "declared"}], "depends_on": []},
+    {"id": "consumer-of-declared", "expected_state": "active", "checks": [{"type": "tcp", "name": "ws", "host": "127.0.0.1", "port": 3000}], "depends_on": [{"service": "declared-only", "type": "hard"}]},
+    {"id": "weird-name", "expected_state": "active", "checks": [{"type": "none", "name": "x", "reason": "quote\"back\\slash,comma=eq space"}], "depends_on": []}
+  ]
+}
